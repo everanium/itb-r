@@ -1,0 +1,20 @@
+Package: itb
+Type: Package
+Title: R Binding for the ITB Triple Pipeline
+Version: 0.3.0
+Authors@R: person("ITB", "Maintainers", email = "a@encloud.asia",
+    role = c("aut", "cre"))
+Description: Thin proxy over the libitb shared library's Triple
+    Pipeline surface (cmd/cshared). Exposes Single Message and
+    Streaming encrypt/decrypt, state-blob export/open, rekey,
+    incremental stream sessions, profile registration, and the Go
+    runtime knobs. Every hash-name / MAC-name / cipher-name /
+    profile-name is an opaque string passed through to Go for
+    validation; no ITB construction logic lives in the binding.
+License: MIT
+URL: https://github.com/everanium/itb
+Depends: R (>= 4.0)
+Suggests: testthat (>= 3.0.0)
+Encoding: UTF-8
+LazyData: true
+NeedsCompilation: yes

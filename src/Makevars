@@ -1,0 +1,16 @@
+# Makevars — compile/link flags for the ITB R binding's C shim.
+#
+# The shim links the repository's libitb.so (cmd/cshared) directly and
+# embeds an rpath to its directory, so the installed package resolves
+# the library without LD_LIBRARY_PATH.
+#
+# ITB_LIBITB_DIR overrides the libitb.so + libitb.h location (set it
+# in the environment before R CMD INSTALL when installing from a copy
+# of the package that does not live inside the repository tree); the
+# default resolves dist/linux-amd64 relative to this src/ directory.
+
+ITB_LIBITB_DIR ?= $(realpath $(CURDIR)/../../../dist/linux-amd64)
+
+PKG_CPPFLAGS = -isystem $(ITB_LIBITB_DIR)
+PKG_CFLAGS = -std=c11 -Wall -Wextra -Wshadow -Wformat=2 -fstack-protector-strong
+PKG_LIBS = -L$(ITB_LIBITB_DIR) -litb -Wl,-rpath,$(ITB_LIBITB_DIR)

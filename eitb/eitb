@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#
+# eitb -- launcher for the eitb CLI. Builds and installs the R package
+# on first use (or after a clean), then forwards every argument to the
+# Rscript entry point.
+
+set -eu
+set -o pipefail
+
+cd "$(dirname "$0")/.."
+
+if [[ ! -d .local/itb ]]; then
+    ./build.sh >&2
+fi
+
+export R_LIBS="$PWD/.local${R_LIBS:+:$R_LIBS}"
+
+exec Rscript eitb/itb_eitb.R "$@"
