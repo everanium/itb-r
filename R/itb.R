@@ -22,7 +22,7 @@
 # Pipeline's external pointer in its protected slot, pinning at the C
 # level as well.
 
-ITB_R_VERSION <- "0.3.3"
+ITB_R_VERSION <- "0.3.4"
 
 # ---- internal helpers -------------------------------------------------
 
