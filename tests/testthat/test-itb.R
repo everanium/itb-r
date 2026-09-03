@@ -33,7 +33,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("itb")), "0.3.4")
+  expect_equal(as.character(utils::packageVersion("itb")), "0.3.5")
 })
 
 test_that("hashes returns the canonical registry order", {

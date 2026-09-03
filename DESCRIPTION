@@ -1,7 +1,7 @@
 Package: itb
 Type: Package
 Title: R Binding for the ITB Triple Pipeline
-Version: 0.3.4
+Version: 0.3.5
 Authors@R: person("ITB", "Maintainers", email = "a@encloud.asia",
     role = c("aut", "cre"))
 Description: Thin proxy over the libitb shared library's Triple
