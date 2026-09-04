@@ -33,23 +33,17 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("itb")), "0.3.5")
+  expect_equal(as.character(utils::packageVersion("itb")), "0.4.1")
 })
 
-test_that("hashes returns the canonical registry order", {
-  expected <- c(
-    "areion256", "areion512", "blake2b256", "blake2b512",
-    "blake2s", "blake3", "aescmac", "siphash24", "chacha20"
-  )
-  got <- hashes()
-  expect_s3_class(got, "data.frame")
-  expect_equal(got$name, expected)
-  expect_true(all(got$width > 0))
-})
-
-test_that("profiles lists the built-in Triple profiles", {
+test_that("profiles lists the registered Triple profiles", {
   got <- profiles()
   expect_gt(length(got), 0)
+  expect_identical(got, sort(got))
+  for (p in got) {
+    expect_true(grepl(sprintf('"name":"%s"', p), lookup(p), fixed = TRUE))
+  }
+  expect_itb_status(lookup("no-such-profile"), itb_status$UNKNOWN_PROFILE)
   for (want in c(
     "singlemsg-triple-mac-v1",
     "singlemsg-triple-nomac-v1",
@@ -67,7 +61,7 @@ test_that("runtime knobs query without changing", {
 
 test_that("message round trip (singlemsg-triple-mac-v1)", {
   sender <- pipeline_create("singlemsg-triple-mac-v1")
-  receiver <- pipeline_open("singlemsg-triple-mac-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   for (size in c(1L, 4L * 1024L, 256L * 1024L)) {
     plain <- payload(size, size)
     wire <- pipeline_encrypt_message(sender, plain)
@@ -81,7 +75,7 @@ test_that("message round trip (singlemsg-triple-mac-v1)", {
 
 test_that("stream round trip (streaming-noaead-triple-v1)", {
   sender <- pipeline_create("streaming-noaead-triple-v1")
-  receiver <- pipeline_open("streaming-noaead-triple-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   plain <- payload(96L * 1024L, 7L)
 
   # Encrypt incrementally: 8 KiB writes, then end + drain.
@@ -120,7 +114,7 @@ test_that("stream round trip (streaming-noaead-triple-v1)", {
 
 test_that("pump helper round trip", {
   sender <- pipeline_create("streaming-noaead-triple-v1")
-  receiver <- pipeline_open("streaming-noaead-triple-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   plain <- payload(64L * 1024L + 3L, 11L)
 
   reader_over <- function(s) {
@@ -157,9 +151,9 @@ test_that("pump helper round trip", {
   pipeline_free(sender)
 })
 
-test_that("large plaintext round trip (pattern P1, > 1 MiB)", {
+test_that("large plaintext round trip (> 1 MiB)", {
   sender <- pipeline_create("singlemsg-triple-nomac-v1")
-  receiver <- pipeline_open("singlemsg-triple-nomac-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   plain <- payload(2L * 1024L * 1024L + 17L, 3L)
   wire <- pipeline_encrypt_message(sender, plain)
   expect_identical(pipeline_decrypt_message(receiver, wire), plain)
@@ -167,12 +161,12 @@ test_that("large plaintext round trip (pattern P1, > 1 MiB)", {
   pipeline_free(sender)
 })
 
-test_that("unknown profile maps to BAD_INPUT", {
+test_that("unknown profile maps to UNKNOWN_PROFILE", {
   err <- expect_itb_status(
     pipeline_create("no-such-profile"),
-    itb_status$BAD_INPUT
+    itb_status$UNKNOWN_PROFILE
   )
-  expect_equal(err$label, "invalid input")
+  expect_equal(err$label, "unknown profile name")
   expect_s3_class(err, "itb_error")
 })
 
@@ -189,7 +183,7 @@ test_that("unknown opts key maps to BAD_INPUT", {
 
 test_that("tampered wire fails authentication", {
   sender <- pipeline_create("singlemsg-triple-mac-v1")
-  receiver <- pipeline_open("singlemsg-triple-mac-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   wire <- pipeline_encrypt_message(sender, payload(4096L, 21L))
   i <- length(wire) %/% 2L
   wire[i] <- xor(wire[i], as.raw(0xFF))
@@ -221,12 +215,12 @@ test_that("freed pipeline raises an R error", {
 
 test_that("rekey refreshes the blob", {
   sender <- pipeline_create("singlemsg-triple-mac-v1")
-  blob_before <- pipeline_blob(sender)
-  pipeline_rekey(sender, payload(32L, 5L), payload(32L, 6L))
-  blob_after <- pipeline_blob(sender)
+  blob_before <- pipeline_save(sender)
+  blob_after <- pipeline_rekey(sender, payload(32L, 5L), payload(32L, 6L))
   expect_false(identical(blob_after, blob_before))
+  expect_identical(pipeline_save(sender), blob_after)
   # The refreshed blob reconstructs a working receiver.
-  receiver <- pipeline_open("singlemsg-triple-mac-v1", blob_after)
+  receiver <- pipeline_load(blob_after)
   wire <- pipeline_encrypt_message(sender, "post-rekey payload")
   expect_identical(
     rawToChar(pipeline_decrypt_message(receiver, wire)),
@@ -236,33 +230,105 @@ test_that("rekey refreshes the blob", {
   pipeline_free(sender)
 })
 
-test_that("register_profile round trip and duplicate", {
-  opts <- itb_opts(
-    mode = "singlemsg-nomac",
-    width = "256",
-    innerHashes = paste(
-      "blake3", "blake2s", "areion256", "blake2b256",
-      "chacha20", "blake3", "blake2s", "areion256",
-      sep = ","
-    ),
-    keyBits = "1024",
-    parallaxOn = "false",
-    wrapperOn = "false"
+test_that("register round trip and duplicate", {
+  profile <- paste0(
+    '{"mode":"singlemsg-nomac","width":256,',
+    '"hashes":["blake3","blake2s","areion256","blake2b256",',
+    '"chacha20","blake3","blake2s","areion256"],',
+    '"keybits":1024,"parallax":false,"wrapper":false}'
   )
-  register_profile("r-binding-test-mixed", opts)
+  register("r-binding-test-mixed", profile)
+  expect_true("r-binding-test-mixed" %in% profiles())
+  expect_true(grepl('"hashes":["blake3"', lookup("r-binding-test-mixed"), fixed = TRUE))
   sender <- pipeline_create("r-binding-test-mixed")
-  receiver <- pipeline_open("r-binding-test-mixed", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   wire <- pipeline_encrypt_message(sender, "custom profile")
   expect_identical(
     rawToChar(pipeline_decrypt_message(receiver, wire)),
     "custom profile"
   )
   expect_itb_status(
-    register_profile("r-binding-test-mixed", opts),
+    register("r-binding-test-mixed", profile),
     itb_status$PROFILE_EXISTS
+  )
+  # Strict record decode on the Go side: an unknown key is rejected
+  # there, not by the binding.
+  expect_itb_status(
+    register("r-binding-test-badkey", '{"mode":"singlemsg-nomac","bogus":1}'),
+    itb_status$BAD_INPUT
   )
   pipeline_free(receiver)
   pipeline_free(sender)
+})
+
+test_that("save / load round trip", {
+  sender <- pipeline_create("singlemsg-triple-mac-v1")
+  blob <- pipeline_save(sender)
+  expect_gt(length(blob), 0L)
+  expect_identical(pipeline_save(sender), blob)
+  receiver <- pipeline_load(blob)
+  expect_identical(pipeline_save(receiver), blob)
+  wire <- pipeline_encrypt_message(sender, "in-memory persist")
+  expect_identical(rawToChar(pipeline_decrypt_message(receiver, wire)), "in-memory persist")
+  pipeline_free(receiver)
+  pipeline_free(sender)
+})
+
+test_that("save_f / load_f round trip", {
+  dir <- tempfile("itb-persist-")
+  dir.create(dir)
+  on.exit(unlink(dir, recursive = TRUE))
+  path <- file.path(dir, "session.blob")
+  sender <- pipeline_create("singlemsg-triple-mac-v1")
+  pipeline_save_f(sender, path)
+  expect_equal(as.integer(file.info(path)$mode), strtoi("600", 8L))
+  receiver <- pipeline_load_f(path)
+  expect_identical(pipeline_save(receiver), pipeline_save(sender))
+  wire <- pipeline_encrypt_message(sender, "file persist")
+  expect_identical(rawToChar(pipeline_decrypt_message(receiver, wire)), "file persist")
+  expect_itb_status(pipeline_load_f(file.path(dir, "absent.blob")), itb_status$BAD_INPUT)
+  pipeline_free(receiver)
+  pipeline_free(sender)
+})
+
+test_that("load with master override", {
+  sender <- pipeline_create("singlemsg-triple-mac-v1")
+  rotated <- pipeline_rekey(sender, payload(32L, 8L), payload(32L, 10L))
+  receiver <- pipeline_load(pipeline_save(sender), payload(32L, 8L), payload(32L, 10L))
+  expect_identical(pipeline_save(receiver), rotated)
+  wire <- pipeline_encrypt_message(sender, "master override")
+  expect_identical(rawToChar(pipeline_decrypt_message(receiver, wire)), "master override")
+  pipeline_free(receiver)
+  pipeline_free(sender)
+})
+
+test_that("inspect matches lookup", {
+  pipe <- pipeline_create("singlemsg-triple-mac-v1")
+  record <- inspect(pipeline_save(pipe))
+  expect_true(grepl('"name":"singlemsg-triple-mac-v1"', record, fixed = TRUE))
+  expect_true(grepl('"mode":"singlemsg-mac"', record, fixed = TRUE))
+  expect_identical(record, lookup("singlemsg-triple-mac-v1"))
+  expect_itb_status(inspect("not a blob"), itb_status$BAD_INPUT)
+  pipeline_free(pipe)
+})
+
+test_that("max_workers", {
+  pipe <- pipeline_create("singlemsg-triple-mac-v1")
+  pipeline_max_workers(pipe, 2L)
+  pipeline_max_workers(pipe, -1L) # clamped to auto, never rejected
+  pipeline_max_workers(pipe, 10000L) # clamped to 256
+  wire <- pipeline_encrypt_message(pipe, "after cap change")
+  expect_identical(rawToChar(pipeline_decrypt_message(pipe, wire)), "after cap change")
+  pipeline_close(pipe)
+  expect_itb_status(pipeline_max_workers(pipe, 2L), itb_status$TRIPLE_CLOSED)
+  pipeline_free(pipe)
+  # A negative init-time cap is clamped as well.
+  neg <- pipeline_create("singlemsg-triple-mac-v1", opts = itb_opts(max_workers = -1))
+  expect_identical(
+    rawToChar(pipeline_decrypt_message(neg, pipeline_encrypt_message(neg, "negative cap"))),
+    "negative cap"
+  )
+  pipeline_free(neg)
 })
 
 test_that("stream session pins its parent pipeline against GC", {
@@ -284,7 +350,7 @@ test_that("stream session pins its parent pipeline against GC", {
 
 test_that("one-shot stream calls match the session shape", {
   sender <- pipeline_create("streaming-noaead-triple-v1")
-  receiver <- pipeline_open("streaming-noaead-triple-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   plain <- payload(32L * 1024L, 13L)
   wire <- pipeline_encrypt_stream_one_shot(sender, plain)
   expect_identical(pipeline_decrypt_stream_one_shot(receiver, wire), plain)
@@ -322,7 +388,7 @@ test_that("hex codec", {
 
 test_that("stream_read_into partial drain reassembles the stream", {
   sender <- pipeline_create("streaming-noaead-triple-v1")
-  receiver <- pipeline_open("streaming-noaead-triple-v1", pipeline_blob(sender))
+  receiver <- pipeline_load(pipeline_save(sender))
   plain <- payload(256L * 1024L + 13L, 29L)
 
   # Encrypt: whole-buffer feed, then drain through a deliberately

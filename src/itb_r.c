@@ -11,14 +11,19 @@
  * Registered .Call entry points (R-facing wrappers live in R/itb.R):
  *
  *   C_r_version()                      -> character(1)
- *   C_r_hashes()                       -> list(name = chr, width = int)
- *   C_r_profiles()                     -> character vector
+ *   C_r_profiles()                     -> character vector (sorted)
  *   C_r_set_memory_limit(num)          -> numeric(1)  previous limit
  *   C_r_set_gc_percent(int)            -> integer(1)  previous percent
- *   C_r_register_profile(chr, chr)     -> NULL
+ *   C_r_inspect(raw)                   -> character(1) profile-record JSON
+ *   C_r_register(chr, chr)             -> NULL
+ *   C_r_lookup(chr)                    -> character(1) profile-record JSON
  *   C_r_now()                          -> numeric(1)  monotonic seconds
- *   C_r_pipeline_create(chr, chr)      -> list(ptr = extptr, blob = raw)
- *   C_r_pipeline_open(chr, raw, chr, raw|NULL, raw|NULL) -> extptr
+ *   C_r_pipeline_create(chr, chr)      -> extptr
+ *   C_r_pipeline_load(raw, raw|NULL, raw|NULL)    -> extptr
+ *   C_r_pipeline_load_f(chr, raw|NULL, raw|NULL)  -> extptr
+ *   C_r_pipeline_save(extptr)          -> raw (current blob)
+ *   C_r_pipeline_save_f(extptr, chr)   -> NULL
+ *   C_r_pipeline_max_workers(extptr, int) -> NULL
  *   C_r_pipeline_encrypt_message(extptr, raw)  -> raw
  *   C_r_pipeline_decrypt_message(extptr, raw)  -> raw
  *   C_r_pipeline_encrypt_stream_one_shot(extptr, raw) -> raw
@@ -90,6 +95,9 @@ enum {
     ST_SEED_WIDTH_MIX = 8,
     ST_BAD_MAC = 9,
     ST_MAC_FAILURE = 10,
+    ST_BLOB_MALFORMED_RECIPE = 11,
+    ST_RECIPE_PRIMITIVE_UNKNOWN = 12,
+    ST_UNKNOWN_PROFILE = 13,
     ST_BLOB_MODE_MISMATCH = 19,
     ST_BLOB_MALFORMED = 20,
     ST_BLOB_VERSION_TOO_NEW = 21,
@@ -118,6 +126,10 @@ static const status_row STATUS_ROWS[] = {
     {ST_SEED_WIDTH_MIX, "seed width mismatch"},
     {ST_BAD_MAC, "unknown MAC name or invalid MAC handle"},
     {ST_MAC_FAILURE, "MAC verification failed"},
+    {ST_BLOB_MALFORMED_RECIPE, "blob profile record invalid"},
+    {ST_RECIPE_PRIMITIVE_UNKNOWN,
+     "blob profile record names a primitive absent from the local registries"},
+    {ST_UNKNOWN_PROFILE, "unknown profile name"},
     {ST_BLOB_MODE_MISMATCH, "blob mode mismatch"},
     {ST_BLOB_MALFORMED, "malformed state blob"},
     {ST_BLOB_VERSION_TOO_NEW, "blob version too new"},
@@ -138,20 +150,6 @@ static const char *status_label(int code) {
     }
     return "unknown status";
 }
-
-/* Shipped built-in Triple profile names (mirrors the profile registry
- * in triple/profile.go; the C ABI exposes no profile enumeration). */
-static const char *const PROFILE_NAMES[] = {
-    "streaming-aead-triple-mac-v1",
-    "streaming-noaead-triple-v1",
-    "singlemsg-triple-mac-v1",
-    "singlemsg-triple-nomac-v1",
-    "blob-triple-mac-v1",
-    "streaming-aead-triple-mac-mixed-v1",
-    "streaming-noaead-triple-mixed-v1",
-    "singlemsg-triple-mac-mixed-v1",
-    "singlemsg-triple-nomac-mixed-v1",
-};
 
 /* ---- error raising ------------------------------------------------ */
 
@@ -297,6 +295,68 @@ static SEXP cipher_call(cipher_fn fn, uintptr_t handle, const Rbyte *src,
     return R_NilValue; /* not reached */
 }
 
+/* ---- caller-allocated-buffer helper ---------------------------------- */
+
+/* Floor capacity for blob output buffers (Init / Save / Rekey). */
+#define BLOB_CAP ((size_t)(64 * 1024))
+
+/* Floor capacity for profile-JSON output buffers (Inspect / Lookup /
+ * Profiles). */
+#define JSON_CAP ((size_t)(4 * 1024))
+
+/* One caller-allocated-buffer call: writes into (out, cap) and reports
+ * the produced or required length through n. */
+typedef int (*buf_fn)(void *ctx, void *out, size_t cap, size_t *n);
+
+/* Runs a caller-allocated-buffer entry with the retry-once discipline;
+ * returns the R_alloc scratch holding the produced bytes and their
+ * count through *len. */
+static char *buf_call(buf_fn fn, void *ctx, size_t cap, size_t *len) {
+    int attempt;
+    for (attempt = 0; attempt < 2; attempt++) {
+        char *buf = R_alloc(cap + 1, 1);
+        size_t n = 0;
+        int rc = fn(ctx, buf, cap, &n);
+        if (rc == ST_BUFFER_TOO_SMALL && n > cap && attempt == 0) {
+            cap = n;
+            continue;
+        }
+        if (rc != ST_OK) {
+            raise_status(rc);
+        }
+        buf[n] = '\0';
+        *len = n;
+        return buf;
+    }
+    raise_status(ST_BUFFER_TOO_SMALL);
+    return NULL; /* not reached */
+}
+
+static SEXP raw_from(const char *buf, size_t n) {
+    SEXP out = PROTECT(Rf_allocVector(RAWSXP, (R_xlen_t)n));
+    memcpy(RAW(out), buf, n);
+    UNPROTECT(1);
+    return out;
+}
+
+/* Reads the optional (perm, wrap) master pair into the masters triple
+ * the Load entries take: count 0 selects the blob-embedded masters,
+ * count 2 overrides them. */
+static void masters_triple(SEXP perm, SEXP wrap, const Rbyte **permp,
+                           size_t *permlen, const Rbyte **wrapp,
+                           size_t *wraplen, size_t *count) {
+    *permp = NULL;
+    *wrapp = NULL;
+    *permlen = 0;
+    *wraplen = 0;
+    *count = 0;
+    if (perm != R_NilValue || wrap != R_NilValue) {
+        *permp = arg_raw(perm, permlen, "perm master");
+        *wrapp = arg_raw(wrap, wraplen, "wrap master");
+        *count = 2;
+    }
+}
+
 /* ---- module functions ----------------------------------------------- */
 
 SEXP C_r_version(void) {
@@ -318,43 +378,80 @@ SEXP C_r_version(void) {
     return Rf_mkString(buf);
 }
 
-SEXP C_r_hashes(void) {
-    int count = ITB_HashCount();
-    SEXP names = PROTECT(Rf_allocVector(STRSXP, count));
-    SEXP widths = PROTECT(Rf_allocVector(INTSXP, count));
-    SEXP out, out_names;
-    int i;
-    for (i = 0; i < count; i++) {
-        char name[128];
-        size_t n = 0;
-        int rc = ITB_HashName(i, name, sizeof(name), &n);
-        if (rc != ST_OK) {
-            raise_status(rc);
-        }
-        name[n > 0 ? n - 1 : 0] = '\0';
-        SET_STRING_ELT(names, i, Rf_mkChar(name));
-        INTEGER(widths)[i] = ITB_HashWidth(i);
-    }
-    out = PROTECT(Rf_allocVector(VECSXP, 2));
-    SET_VECTOR_ELT(out, 0, names);
-    SET_VECTOR_ELT(out, 1, widths);
-    out_names = PROTECT(Rf_allocVector(STRSXP, 2));
-    SET_STRING_ELT(out_names, 0, Rf_mkChar("name"));
-    SET_STRING_ELT(out_names, 1, Rf_mkChar("width"));
-    Rf_setAttrib(out, R_NamesSymbol, out_names);
-    UNPROTECT(4);
-    return out;
+static int profiles_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    (void)ctx;
+    return ITB_Triple_Profiles(out, cap, n);
 }
 
+/* Sorted vector of every registered profile name. libitb writes a
+ * JSON array of strings; profile names are restricted to [a-z0-9-] so
+ * the array unpacks by scanning the quoted items. */
 SEXP C_r_profiles(void) {
-    const int count = (int)(sizeof(PROFILE_NAMES) / sizeof(PROFILE_NAMES[0]));
-    SEXP out = PROTECT(Rf_allocVector(STRSXP, count));
-    int i;
-    for (i = 0; i < count; i++) {
-        SET_STRING_ELT(out, i, Rf_mkChar(PROFILE_NAMES[i]));
+    size_t len = 0;
+    const char *json = buf_call(profiles_thunk, NULL, JSON_CAP, &len);
+    const char *end = json + len;
+    const char *p;
+    int count = 0, i = 0;
+    SEXP out;
+    for (p = json; p < end; p++) {
+        if (*p == '"') count++;
+    }
+    out = PROTECT(Rf_allocVector(STRSXP, count / 2));
+    p = json;
+    while (p < end && i < count / 2) {
+        const char *q = memchr(p, '"', (size_t)(end - p));
+        const char *e;
+        if (q == NULL) break;
+        e = memchr(q + 1, '"', (size_t)(end - (q + 1)));
+        if (e == NULL) break;
+        SET_STRING_ELT(out, i++, Rf_mkCharLen(q + 1, (int)(e - (q + 1))));
+        p = e + 1;
     }
     UNPROTECT(1);
     return out;
+}
+
+typedef struct {
+    const Rbyte *blob;
+    size_t bloblen;
+} inspect_ctx;
+
+static int inspect_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    inspect_ctx *c = (inspect_ctx *)ctx;
+    return ITB_Triple_Inspect(MUT(c->blob), c->bloblen, out, cap, n);
+}
+
+/* Profile-record JSON of a blob (the encoding C_r_register accepts and
+ * the blob carries; name included). */
+SEXP C_r_inspect(SEXP blob) {
+    inspect_ctx c;
+    size_t len = 0;
+    const char *json;
+    c.blob = arg_raw(blob, &c.bloblen, "blob");
+    json = buf_call(inspect_thunk, &c, JSON_CAP, &len);
+    return Rf_mkString(json);
+}
+
+SEXP C_r_register(SEXP name, SEXP profile_json) {
+    int rc = ITB_Triple_Register(MUT(arg_string(name, "name")),
+                                 MUT(arg_string(profile_json, "profile")));
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    return R_NilValue;
+}
+
+static int lookup_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    return ITB_Triple_Lookup(MUT((const char *)ctx), out, cap, n);
+}
+
+/* Profile-record JSON of a registered name; an unknown name raises
+ * UNKNOWN_PROFILE. */
+SEXP C_r_lookup(SEXP name) {
+    const char *nm = arg_string(name, "name");
+    size_t len = 0;
+    const char *json = buf_call(lookup_thunk, (void *)(uintptr_t)nm, JSON_CAP, &len);
+    return Rf_mkString(json);
 }
 
 SEXP C_r_set_memory_limit(SEXP limit) {
@@ -371,15 +468,6 @@ SEXP C_r_set_gc_percent(SEXP pct) {
     return Rf_ScalarInteger(ITB_SetGCPercent(arg_int(pct, "pct")));
 }
 
-SEXP C_r_register_profile(SEXP name, SEXP opts) {
-    int rc = ITB_Triple_RegisterProfile(
-        MUT(arg_string(name, "name")), MUT(arg_string(opts, "opts")));
-    if (rc != ST_OK) {
-        raise_status(rc);
-    }
-    return R_NilValue;
-}
-
 /* Monotonic wall-clock seconds (for benchmarking; proc.time()'s
  * "elapsed" has coarser resolution on some platforms and user+sys
  * over-count the Go runtime's worker threads). */
@@ -391,73 +479,99 @@ SEXP C_r_now(void) {
 
 /* ---- Pipeline lifecycle ---------------------------------------------- */
 
-/* Floor capacity for blob output buffers (Init / Rekey). */
-#define BLOB_CAP ((size_t)(64 * 1024))
+typedef struct {
+    const char *profile;
+    const char *opts;
+    uintptr_t handle;
+} init_ctx;
 
-SEXP C_r_pipeline_create(SEXP profile, SEXP opts) {
-    const char *prof = arg_string(profile, "profile");
-    const char *o = arg_string(opts, "opts");
-    size_t cap = BLOB_CAP;
-    int attempt;
-    for (attempt = 0; attempt < 2; attempt++) {
-        char *buf = R_alloc(cap, 1);
-        size_t n = 0;
-        uintptr_t handle = 0;
-        int rc = ITB_Triple_Init(MUT(prof), MUT(o), buf, cap, &n, &handle);
-        if (rc == ST_BUFFER_TOO_SMALL && n > cap && attempt == 0) {
-            /* libitb closes the undersized attempt before returning;
-             * the retry re-runs Init and yields a fresh session. */
-            cap = n;
-            continue;
-        }
-        if (rc != ST_OK) {
-            raise_status(rc);
-        }
-        {
-            SEXP blob = PROTECT(Rf_allocVector(RAWSXP, (R_xlen_t)n));
-            SEXP ptr, out, out_names;
-            memcpy(RAW(blob), buf, n);
-            ptr = PROTECT(
-                make_handle(handle, PIPE_TAG, R_NilValue, pipe_finalizer));
-            out = PROTECT(Rf_allocVector(VECSXP, 2));
-            SET_VECTOR_ELT(out, 0, ptr);
-            SET_VECTOR_ELT(out, 1, blob);
-            out_names = PROTECT(Rf_allocVector(STRSXP, 2));
-            SET_STRING_ELT(out_names, 0, Rf_mkChar("ptr"));
-            SET_STRING_ELT(out_names, 1, Rf_mkChar("blob"));
-            Rf_setAttrib(out, R_NamesSymbol, out_names);
-            UNPROTECT(4);
-            return out;
-        }
-    }
-    raise_status(ST_BUFFER_TOO_SMALL);
-    return R_NilValue; /* not reached */
+static int init_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    init_ctx *c = (init_ctx *)ctx;
+    /* libitb closes an undersized attempt before returning; the retry
+     * re-runs Init and yields a fresh session. */
+    return ITB_Triple_Init(MUT(c->profile), MUT(c->opts), out, cap, n,
+                           &c->handle);
 }
 
-SEXP C_r_pipeline_open(SEXP profile, SEXP blob, SEXP opts, SEXP perm,
-                       SEXP wrap) {
-    const char *prof = arg_string(profile, "profile");
+/* Fresh session against the named profile; the Init-time blob copy is
+ * dropped (pipeline_save re-reads it from the handle). */
+SEXP C_r_pipeline_create(SEXP profile, SEXP opts) {
+    init_ctx c;
+    size_t len = 0;
+    c.profile = arg_string(profile, "profile");
+    c.opts = arg_string(opts, "opts");
+    c.handle = 0;
+    buf_call(init_thunk, &c, BLOB_CAP, &len);
+    return make_handle(c.handle, PIPE_TAG, R_NilValue, pipe_finalizer);
+}
+
+/* Reopens a session from blob bytes; the blob's embedded profile
+ * record is the sole structural source. */
+SEXP C_r_pipeline_load(SEXP blob, SEXP perm, SEXP wrap) {
     size_t bloblen = 0;
     const Rbyte *blobp = arg_raw(blob, &bloblen, "blob");
-    const char *o = arg_string(opts, "opts");
-    size_t permlen = 0, wraplen = 0, count = 0;
-    const Rbyte *permp = NULL, *wrapp = NULL;
+    const Rbyte *permp, *wrapp;
+    size_t permlen, wraplen, count;
     uintptr_t handle = 0;
     int rc;
-    if (perm != R_NilValue || wrap != R_NilValue) {
-        permp = arg_raw(perm, &permlen, "perm master");
-        wrapp = arg_raw(wrap, &wraplen, "wrap master");
-        if (permlen == 0 || wraplen == 0) {
-            Rf_error("itb: master override buffers must be non-empty");
-        }
-        count = 2;
-    }
-    rc = ITB_Triple_Open(MUT(prof), MUT(blobp), bloblen, MUT(o), MUT(permp),
-                         permlen, MUT(wrapp), wraplen, count, &handle);
+    masters_triple(perm, wrap, &permp, &permlen, &wrapp, &wraplen, &count);
+    rc = ITB_Triple_Load(MUT(blobp), bloblen, MUT(permp), permlen, MUT(wrapp),
+                         wraplen, count, &handle);
     if (rc != ST_OK) {
         raise_status(rc);
     }
     return make_handle(handle, PIPE_TAG, R_NilValue, pipe_finalizer);
+}
+
+/* C_r_pipeline_load for a blob stored in a file; the file is read
+ * inside the library. */
+SEXP C_r_pipeline_load_f(SEXP path, SEXP perm, SEXP wrap) {
+    const char *p = arg_string(path, "path");
+    const Rbyte *permp, *wrapp;
+    size_t permlen, wraplen, count;
+    uintptr_t handle = 0;
+    int rc;
+    masters_triple(perm, wrap, &permp, &permlen, &wrapp, &wraplen, &count);
+    rc = ITB_Triple_LoadF(MUT(p), MUT(permp), permlen, MUT(wrapp), wraplen,
+                          count, &handle);
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    return make_handle(handle, PIPE_TAG, R_NilValue, pipe_finalizer);
+}
+
+static int save_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    return ITB_Triple_Save(*(uintptr_t *)ctx, out, cap, n);
+}
+
+/* The handle's current blob: the bytes create produced, the bytes load
+ * re-marshalled, or the bytes of the latest rekey. */
+SEXP C_r_pipeline_save(SEXP ptr) {
+    uintptr_t handle = check_handle(ptr, PIPE_TAG, "pipeline");
+    size_t len = 0;
+    const char *buf = buf_call(save_thunk, &handle, BLOB_CAP, &len);
+    return raw_from(buf, len);
+}
+
+/* Writes the blob to path inside the library (mode 0600). */
+SEXP C_r_pipeline_save_f(SEXP ptr, SEXP path) {
+    uintptr_t handle = check_handle(ptr, PIPE_TAG, "pipeline");
+    int rc = ITB_Triple_SaveF(handle, MUT(arg_string(path, "path")));
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    return R_NilValue;
+}
+
+/* Sets the worker cap; n is clamped by libitb (n <= 0 auto, > 256
+ * treated as 256), never rejected. */
+SEXP C_r_pipeline_max_workers(SEXP ptr, SEXP n) {
+    uintptr_t handle = check_handle(ptr, PIPE_TAG, "pipeline");
+    int rc = ITB_Triple_MaxWorkers(handle, arg_int(n, "n"));
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    return R_NilValue;
 }
 
 SEXP C_r_pipeline_encrypt_message(SEXP ptr, SEXP plaintext) {
@@ -488,36 +602,30 @@ SEXP C_r_pipeline_decrypt_stream_one_shot(SEXP ptr, SEXP wire) {
     return cipher_call(ITB_Triple_DecryptStream, handle, src, n);
 }
 
-/* Rotates the parallax + wrapper masters; returns the refreshed blob
- * (the R wrapper stores it on the Pipeline object). */
+typedef struct {
+    uintptr_t handle;
+    const Rbyte *perm;
+    size_t permlen;
+    const Rbyte *wrap;
+    size_t wraplen;
+} rekey_ctx;
+
+static int rekey_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    rekey_ctx *c = (rekey_ctx *)ctx;
+    return ITB_Triple_Rekey(c->handle, MUT(c->perm), c->permlen, MUT(c->wrap),
+                            c->wraplen, out, cap, n);
+}
+
+/* Rotates the parallax + wrapper masters; returns the refreshed blob. */
 SEXP C_r_pipeline_rekey(SEXP ptr, SEXP perm, SEXP wrap) {
-    uintptr_t handle = check_handle(ptr, PIPE_TAG, "pipeline");
-    size_t permlen = 0, wraplen = 0;
-    const Rbyte *permp = arg_raw(perm, &permlen, "perm master");
-    const Rbyte *wrapp = arg_raw(wrap, &wraplen, "wrap master");
-    size_t cap = BLOB_CAP;
-    int attempt;
-    for (attempt = 0; attempt < 2; attempt++) {
-        char *buf = R_alloc(cap, 1);
-        size_t n = 0;
-        int rc = ITB_Triple_Rekey(handle, MUT(permp), permlen, MUT(wrapp),
-                                  wraplen, buf, cap, &n);
-        if (rc == ST_BUFFER_TOO_SMALL && n > cap && attempt == 0) {
-            cap = n;
-            continue;
-        }
-        if (rc != ST_OK) {
-            raise_status(rc);
-        }
-        {
-            SEXP blob = PROTECT(Rf_allocVector(RAWSXP, (R_xlen_t)n));
-            memcpy(RAW(blob), buf, n);
-            UNPROTECT(1);
-            return blob;
-        }
-    }
-    raise_status(ST_BUFFER_TOO_SMALL);
-    return R_NilValue; /* not reached */
+    rekey_ctx c;
+    size_t len = 0;
+    const char *buf;
+    c.handle = check_handle(ptr, PIPE_TAG, "pipeline");
+    c.perm = arg_raw(perm, &c.permlen, "perm master");
+    c.wrap = arg_raw(wrap, &c.wraplen, "wrap master");
+    buf = buf_call(rekey_thunk, &c, BLOB_CAP, &len);
+    return raw_from(buf, len);
 }
 
 /* Zeroes the key material and marks the Pipeline closed (idempotent
@@ -734,14 +842,19 @@ SEXP C_r_stream_free(SEXP ptr) {
 
 static const R_CallMethodDef CALL_DEFS[] = {
     CALLDEF(C_r_version, 0),
-    CALLDEF(C_r_hashes, 0),
     CALLDEF(C_r_profiles, 0),
     CALLDEF(C_r_set_memory_limit, 1),
     CALLDEF(C_r_set_gc_percent, 1),
-    CALLDEF(C_r_register_profile, 2),
+    CALLDEF(C_r_inspect, 1),
+    CALLDEF(C_r_register, 2),
+    CALLDEF(C_r_lookup, 1),
     CALLDEF(C_r_now, 0),
     CALLDEF(C_r_pipeline_create, 2),
-    CALLDEF(C_r_pipeline_open, 5),
+    CALLDEF(C_r_pipeline_load, 3),
+    CALLDEF(C_r_pipeline_load_f, 3),
+    CALLDEF(C_r_pipeline_save, 1),
+    CALLDEF(C_r_pipeline_save_f, 2),
+    CALLDEF(C_r_pipeline_max_workers, 2),
     CALLDEF(C_r_pipeline_encrypt_message, 2),
     CALLDEF(C_r_pipeline_decrypt_message, 2),
     CALLDEF(C_r_pipeline_encrypt_stream_one_shot, 2),

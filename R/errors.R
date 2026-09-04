@@ -10,7 +10,7 @@
 # Callers branch on the status:
 #
 #   tryCatch(pipeline_create("no-such-profile"),
-#            itb_error = function(e) stopifnot(e$status == itb_status$BAD_INPUT))
+#            itb_error = function(e) stopifnot(e$status == itb_status$UNKNOWN_PROFILE))
 
 #' Named libitb status codes (mirrors cmd/cshared/internal/capi/errors.go).
 #' @export
@@ -26,6 +26,9 @@ itb_status <- list(
   SEED_WIDTH_MIX = 8L,
   BAD_MAC = 9L,
   MAC_FAILURE = 10L,
+  BLOB_MALFORMED_RECIPE = 11L,
+  RECIPE_PRIMITIVE_UNKNOWN = 12L,
+  UNKNOWN_PROFILE = 13L,
   BLOB_MODE_MISMATCH = 19L,
   BLOB_MALFORMED = 20L,
   BLOB_VERSION_TOO_NEW = 21L,

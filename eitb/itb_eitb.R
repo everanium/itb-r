@@ -3,20 +3,24 @@
 # Subcommands:
 #
 #     itb_eitb.R version                                library + binding versions
-#     itb_eitb.R hashes                                 shipped hash primitive roster
-#     itb_eitb.R profiles                               built-in Triple profile names
+#     itb_eitb.R profiles                               registered profile catalogue
+#     itb_eitb.R inspect <blob-hex>                     profile record of a blob
 #     itb_eitb.R encrypt <profile> <in-file> <out-file> Single Message encrypt
 #     itb_eitb.R decrypt <profile> <blob-hex> <in-file> <out-file>
 #
-# `encrypt` prints the session blob to stderr as hex; feed that hex
-# back to `decrypt` on the receiving side.
+# `encrypt` prints the session blob (`pipeline_save`) to stderr as
+# hex; feed that hex back to `decrypt` on the receiving side, which
+# reopens the session with `pipeline_load` (the profile argument only
+# routes Single Message versus streaming). `profiles` lists the
+# registered profile catalogue one name per line; the profiles that
+# carry a cipher surface are the ones `encrypt` / `decrypt` accept.
 
 suppressMessages(library(itb))
 
 USAGE <- paste(
   "usage: eitb version",
-  "       eitb hashes",
   "       eitb profiles",
+  "       eitb inspect <blob-hex>",
   "       eitb encrypt <profile> <in-file> <out-file>",
   "       eitb decrypt <profile> <blob-hex> <in-file> <out-file>",
   sep = "\n"
@@ -39,15 +43,12 @@ cmd_version <- function() {
   cat("itb-r", as.character(utils::packageVersion("itb")), "\n")
 }
 
-cmd_hashes <- function() {
-  h <- hashes()
-  for (i in seq_len(nrow(h))) {
-    cat(sprintf("%2d  %-12s %d bits\n", i - 1L, h$name[i], h$width[i]))
-  }
-}
-
 cmd_profiles <- function() {
   cat(profiles(), sep = "\n")
+}
+
+cmd_inspect <- function(blob_hex) {
+  cat(inspect(from_hex(blob_hex)), "\n")
 }
 
 # Profiles whose canonical name begins with "streaming-" route
@@ -74,7 +75,7 @@ cmd_encrypt <- function(profile, infile, outfile) {
   }
   ensure_parent_dir(outfile)
   write_file(outfile, wire)
-  message(to_hex(pipeline_blob(pipe)))
+  message(to_hex(pipeline_save(pipe)))
   cat(sprintf(
     "encrypted %s -> %s (%d -> %d bytes)\n",
     infile, outfile, length(plain), length(wire)
@@ -84,7 +85,7 @@ cmd_encrypt <- function(profile, infile, outfile) {
 cmd_decrypt <- function(profile, blob_hex, infile, outfile) {
   blob <- from_hex(blob_hex)
   wire <- read_file(infile)
-  pipe <- pipeline_open(profile, blob)
+  pipe <- pipeline_load(blob)
   on.exit(pipeline_free(pipe))
   plain <- if (is_streaming_profile(profile)) {
     pipeline_decrypt_stream_one_shot(pipe, wire)
@@ -101,7 +102,8 @@ cmd_decrypt <- function(profile, blob_hex, infile, outfile) {
 
 main <- function(argv) {
   known_shape <-
-    (length(argv) == 1L && argv[1] %in% c("version", "hashes", "profiles")) ||
+    (length(argv) == 1L && argv[1] %in% c("version", "profiles")) ||
+      (length(argv) == 2L && argv[1] == "inspect") ||
       (length(argv) == 4L && argv[1] == "encrypt") ||
       (length(argv) == 5L && argv[1] == "decrypt")
   if (!known_shape) {
@@ -116,8 +118,8 @@ main <- function(argv) {
       set_gc_percent(20)
       switch(argv[1],
         version = cmd_version(),
-        hashes = cmd_hashes(),
         profiles = cmd_profiles(),
+        inspect = cmd_inspect(argv[2]),
         encrypt = cmd_encrypt(argv[2], argv[3], argv[4]),
         decrypt = cmd_decrypt(argv[2], argv[3], argv[4], argv[5])
       )

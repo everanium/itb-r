@@ -11,7 +11,7 @@
 # Objects are environment-backed (reference semantics) with S3 class
 # attributes:
 #
-#   ITBPipeline         ptr (external pointer), blob (raw), profile
+#   ITBPipeline         ptr (external pointer)
 #   ITBStreamEncryptor  ptr, parent (the Pipeline object), ended
 #   ITBStreamDecryptor  ptr, parent (the Pipeline object), ended
 #
@@ -22,7 +22,7 @@
 # Pipeline's external pointer in its protected slot, pinning at the C
 # level as well.
 
-ITB_R_VERSION <- "0.3.5"
+ITB_R_VERSION <- "0.4.1"
 
 # ---- internal helpers -------------------------------------------------
 
@@ -71,29 +71,41 @@ version <- function() {
   .Call(C_r_version)
 }
 
-#' Shipped hash primitive roster in canonical registry order, as a
-#' data.frame with `name` and `width` columns.
-#' @export
-hashes <- function() {
-  h <- .Call(C_r_hashes)
-  data.frame(name = h$name, width = h$width, stringsAsFactors = FALSE)
-}
-
-#' Built-in Triple profile names. The C ABI exposes no profile
-#' enumeration; the returned vector mirrors the built-in profile
-#' registry and does not include profiles added at runtime via
-#' `register_profile`.
+#' Sorted character vector of every registered Triple profile name
+#' (the shipped catalogue plus `register` additions).
 #' @export
 profiles <- function() {
   .Call(C_r_profiles)
 }
 
-#' Registers a custom Triple profile from an opts string (see
-#' `itb_opts`). Raises `itb_error` with status PROFILE_EXISTS when the
-#' name is already registered.
+#' Decodes the blob's embedded profile record without opening a
+#' Pipeline and returns it as the JSON text libitb emits (keys `name`,
+#' `mode`, `width`, `hash`, `hashes`, `keybits`, `mac`, `tagstub`,
+#' `chunk`, `wrapper`, `outer`, `parallax`, `palette`, `segment`;
+#' absent keys are optional fields at their zero value). No registry
+#' read, no primitive probe.
 #' @export
-register_profile <- function(name, opts) {
-  invisible(.Call(C_r_register_profile, name, opts))
+inspect <- function(blob) {
+  .Call(C_r_inspect, .as_bytes(blob, "blob"))
+}
+
+#' Registers a profile record under `name` so subsequent
+#' `pipeline_create` / `lookup` calls resolve it. `profile_json` is the
+#' record as JSON text (the shape `inspect` / `lookup` return); a
+#' `name` key inside it, if present, must be empty or equal to `name`.
+#' Validation is performed by libitb; raises `itb_error` with status
+#' PROFILE_EXISTS when the name is already registered.
+#' @export
+register <- function(name, profile_json) {
+  invisible(.Call(C_r_register, name, profile_json))
+}
+
+#' Profile record registered under `name` (a shipped catalogue entry
+#' or a prior `register`) as JSON text. An unknown name raises
+#' `itb_error` with status UNKNOWN_PROFILE.
+#' @export
+lookup <- function(name) {
+  .Call(C_r_lookup, name)
 }
 
 #' Sets the Go runtime's soft memory limit in bytes; returns the
@@ -119,9 +131,7 @@ itb_now <- function() {
 # ---- opts builder ------------------------------------------------------
 
 # Snake_case keys map onto the Go opts grammar; any key not in the map
-# passes through unchanged (the raw escape hatch covering the
-# register-profile grammar: mode, width, innerHashes, parallaxOn,
-# wrapperOn, ...).
+# passes through unchanged.
 .OPTS_KEY_MAP <- c(
   nonce_bits = "nonceBits",
   key_bits = "keyBits",
@@ -164,9 +174,9 @@ itb_now <- function() {
   stop("itb_opts: unsupported value type: ", class(v)[1])
 }
 
-#' Builds the URL-query opts string consumed by `pipeline_create` /
-#' `pipeline_open` / `register_profile` from named arguments (or a
-#' single named list). No validation is performed here — every key and
+#' Builds the URL-query opts string consumed by `pipeline_create` from
+#' named arguments (or a single named list). (Profile registration
+#' takes a JSON record — see `register` — not an opts string.) No validation is performed here — every key and
 #' value passes through to Go verbatim (percent-encoded); libitb
 #' rejects unknown keys or bad values with a diagnostic surfaced
 #' through the `itb_error` condition. Keys are emitted in sorted order
@@ -221,37 +231,73 @@ from_hex <- function(h) {
 
 # ---- Pipeline ----------------------------------------------------------
 
-#' Creates a fresh Triple Pipeline for `profile` (fresh CSPRNG seeds).
-#' When `blob` is supplied, delegates to `pipeline_open` instead. Opts
-#' are a URL-query string (see `itb_opts`).
-#' @export
-pipeline_create <- function(profile, blob = NULL, opts = "") {
-  if (!is.null(blob)) {
-    return(pipeline_open(profile, blob, opts = opts))
-  }
-  r <- .Call(C_r_pipeline_create, profile, opts)
+.wrap_pipeline <- function(ptr) {
   p <- new.env(parent = emptyenv())
-  p$ptr <- r$ptr
-  p$blob <- r$blob
-  p$profile <- profile
+  p$ptr <- ptr
   class(p) <- "ITBPipeline"
   p
 }
 
-#' Opens a Triple Pipeline from an exported state blob (the receiving
-#' side of a key exchange). `perm` / `wrap` optionally override the
+.masters <- function(perm, wrap) {
+  list(
+    perm = if (is.null(perm)) NULL else .as_bytes(perm, "perm master"),
+    wrap = if (is.null(wrap)) NULL else .as_bytes(wrap, "wrap master")
+  )
+}
+
+#' Creates a fresh Triple Pipeline for `profile` (fresh CSPRNG seeds).
+#' Opts are a URL-query string (see `itb_opts`). The session blob is
+#' available through `pipeline_save`.
+#' @export
+pipeline_create <- function(profile, opts = "") {
+  .wrap_pipeline(.Call(C_r_pipeline_create, profile, opts))
+}
+
+#' Reopens a Triple Pipeline from a blob produced by `pipeline_save`
+#' or `pipeline_rekey` (the receiving side of a key exchange). The
+#' blob's embedded profile record is the sole structural source — no
+#' profile name, no opts. `perm` / `wrap` optionally override the
 #' parallax and wrapper masters (both raw vectors, both or neither).
 #' @export
-pipeline_open <- function(profile, blob, opts = "", perm = NULL, wrap = NULL) {
-  blob <- .as_bytes(blob, "blob")
-  if (!is.null(perm)) perm <- .as_bytes(perm, "perm master")
-  if (!is.null(wrap)) wrap <- .as_bytes(wrap, "wrap master")
-  p <- new.env(parent = emptyenv())
-  p$ptr <- .Call(C_r_pipeline_open, profile, blob, opts, perm, wrap)
-  p$blob <- blob
-  p$profile <- profile
-  class(p) <- "ITBPipeline"
-  p
+pipeline_load <- function(blob, perm = NULL, wrap = NULL) {
+  m <- .masters(perm, wrap)
+  .wrap_pipeline(.Call(C_r_pipeline_load, .as_bytes(blob, "blob"), m$perm, m$wrap))
+}
+
+#' `pipeline_load` for a blob stored in a file; the file is read inside
+#' the library.
+#' @export
+pipeline_load_f <- function(path, perm = NULL, wrap = NULL) {
+  m <- .masters(perm, wrap)
+  .wrap_pipeline(.Call(C_r_pipeline_load_f, path, m$perm, m$wrap))
+}
+
+#' The Pipeline's current session blob (raw vector) — the bytes create
+#' produced, the bytes load re-marshalled, or the bytes of the latest
+#' `pipeline_rekey`; transport it to the receiving side and pass to
+#' `pipeline_load`.
+#' @export
+pipeline_save <- function(pipe) {
+  .check_pipeline(pipe)
+  .Call(C_r_pipeline_save, pipe$ptr)
+}
+
+#' Writes the current session blob to `path` inside the library (mode
+#' 0600; the containing directory must exist).
+#' @export
+pipeline_save_f <- function(pipe, path) {
+  .check_pipeline(pipe)
+  invisible(.Call(C_r_pipeline_save_f, pipe$ptr, path))
+}
+
+#' Sets the worker cap for every subsequent cipher call. `n` is
+#' clamped, never rejected: `n <= 0` selects auto, `1..256` pins the
+#' cap, larger values are treated as 256. The cap is per-machine
+#' tuning and is never written to the blob.
+#' @export
+pipeline_max_workers <- function(pipe, n) {
+  .check_pipeline(pipe)
+  invisible(.Call(C_r_pipeline_max_workers, pipe$ptr, as.integer(n)))
 }
 
 #' Single Message encrypt: one call producing a self-contained wire.
@@ -292,25 +338,16 @@ pipeline_decrypt_stream_one_shot <- function(pipe, wire) {
   )
 }
 
-#' The Pipeline's exported state blob (raw vector); transport it to the
-#' receiving side and pass to `pipeline_open`.
-#' @export
-pipeline_blob <- function(pipe) {
-  .check_pipeline(pipe)$blob
-}
-
 #' Rotates the parallax + wrapper masters (both raw vectors or single
-#' strings) and refreshes the stored blob. Returns the new blob
-#' invisibly.
+#' strings) and returns the refreshed session blob (also observable
+#' through `pipeline_save`).
 #' @export
 pipeline_rekey <- function(pipe, perm, wrap) {
   .check_pipeline(pipe)
-  blob <- .Call(
+  .Call(
     C_r_pipeline_rekey, pipe$ptr,
     .as_bytes(perm, "perm master"), .as_bytes(wrap, "wrap master")
   )
-  pipe$blob <- blob
-  invisible(blob)
 }
 
 #' Zeroes the key material and marks the Pipeline closed (idempotent);
@@ -459,18 +496,12 @@ pump <- function(stream, read_fn, write_fn) {
 
 #' @export
 print.ITBPipeline <- function(x, ...) {
-  cat(sprintf(
-    "<ITBPipeline profile=%s blob=%d bytes>\n",
-    x$profile, length(x$blob)
-  ))
+  cat("<ITBPipeline>\n")
   invisible(x)
 }
 
 #' @export
 print.ITBStream <- function(x, ...) {
-  cat(sprintf(
-    "<%s profile=%s ended=%s>\n",
-    class(x)[1], x$parent$profile, x$ended
-  ))
+  cat(sprintf("<%s ended=%s>\n", class(x)[1], x$ended))
   invisible(x)
 }
