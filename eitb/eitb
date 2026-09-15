@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# eitb -- launcher for the eitb CLI. Builds and installs the R package
+# on first use (or after a clean), then forwards every argument to the
+# Rscript entry point.
+
+set -eu
+set -o pipefail
+
+cd "$(dirname "$0")/.."
+
+# The package name comes from DESCRIPTION so the presence check tracks
+# the tree it belongs to; a hard-coded name that drifts would make this
+# launcher reinstall on every invocation.
+PKG_NAME="$(awk '/^Package:/ { print $2; exit }' DESCRIPTION)"
+
+if [[ ! -d ".local/$PKG_NAME" ]]; then
+    ./build.sh >&2
+fi
+
+export R_LIBS="$PWD/.local${R_LIBS:+:$R_LIBS}"
+
+exec Rscript eitb/itb_eitb.R "$@"
