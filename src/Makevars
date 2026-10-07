@@ -1,4 +1,4 @@
-# Makevars — compile/link flags for the ITB R binding's C shim.
+# Compile/link flags for the ITB R binding's C shim.
 #
 # The shim links the repository's libitb3.so (cmd/cshared) directly and
 # embeds an rpath to its directory, so the installed package resolves

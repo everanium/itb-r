@@ -14,7 +14,7 @@ cipher-name / profile-name is an opaque string passed through to Go
 for validation — the binding carries no ITB construction logic. The
 public surface is a `Pipeline` object (create / load / load_f / save
 / save_f / rekey / max_workers / close,
-Single Message encrypt / decrypt, whole-buffer and incremental stream
+Single Message encrypt / decrypt, one-shot and incremental stream
 sessions), an opts query-string builder for `pipeline_create`, the
 profile-catalogue functions (`inspect` / `register` / `lookup` /
 `profiles`), and the
@@ -110,6 +110,53 @@ rotated <- pipeline_rekey(sender, as.raw(rep(0x11, 32)), as.raw(rep(0x22, 32)))
 receiver <- pipeline_load(rotated)
 ```
 
+Raw vectors are the byte-buffer type throughout: outputs are always
+raw vectors; plaintext inputs also accept a single character string
+(converted via `charToRaw`). Objects are environment-backed
+(reference semantics) and carry finalized external pointers, so
+garbage collection releases the Go-side handle when an object goes
+out of scope without an explicit `pipeline_free` / `stream_free`.
+
+Incremental streaming:
+
+```r
+pipe <- pipeline_create("streaming-noaead-triple-v1")
+sess <- stream_encryptor(pipe)
+stream_write(sess, part1)
+stream_write(sess, part2)
+wire <- stream_drain_all(sess)   # end-of-input + drain in one call
+stream_free(sess)
+```
+
+The explicit loop form is `stream_write` / `stream_end` /
+`stream_read`; `stream_read(sess, max)` returns
+`list(chunk = <raw>, finished = <logical>)` and never blocks before
+`stream_end`. The `pump(sess, read_fn, write_fn)` helper moves bytes
+through a session with bounded memory. A stream session holds its
+parent `Pipeline` in the object's `parent` field (and in the external
+pointer's protected slot), so the R garbage collector cannot collect
+the Pipeline while the session is live.
+
+Errors are signalled as R conditions of class `itb_error` (fields
+`status`, `detail`), so `tryCatch` callers branch on the status
+against the `itb_status` constant list while `detail` carries the
+libitb3 diagnostic:
+
+```r
+err <- tryCatch(pipeline_create("no-such-profile"),
+                itb_error = function(e) e)
+stopifnot(err$status == itb_status$UNKNOWN_PROFILE)
+```
+
+Options are URL-query strings built with `itb_opts(...)` (snake_case
+keys map onto the Go opts grammar; unknown keys pass through
+verbatim):
+
+```r
+opts <- itb_opts(nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
+pipe <- pipeline_create("streaming-aead-triple-mac-v1", opts = opts)
+```
+
 ## Persisting sessions
 
 The blob is self-describing: it carries the profile record (mode,
@@ -139,6 +186,13 @@ same name before opening. Attempting to `pipeline_load` such a blob
 through this binding raises an `itb_error` with
 `status == itb_status$RECIPE_PRIMITIVE_UNKNOWN`.
 
+**Runtime tuning.** `pipeline_max_workers(pipe, n)` sets the worker
+cap on a live Pipeline (`n <= 0` selects auto, values above 256 are
+clamped). The cap is per-machine tuning and is never written to the
+blob, so the receiver may pick its own worker cap after
+`pipeline_load`. The `max_workers` opts key sets the same cap at
+`pipeline_create`.
+
 ## Profile registry
 
 ```r
@@ -161,60 +215,6 @@ return; a `name` key inside it, if present, must be empty or equal to
 the name argument. Every rule — name pattern, reserved prefixes,
 field constraints, primitive names — is enforced by libitb3; a
 duplicate name raises `itb_status$PROFILE_EXISTS`.
-
-## Runtime tuning
-
-`pipeline_max_workers(pipe, n)` sets the worker cap on a live
-Pipeline (`n <= 0` selects auto, values above 256 are clamped). The
-cap is per-machine tuning and is never written to the blob, so the
-receiver may pick its own worker cap after `pipeline_load`. The
-`max_workers` opts key sets the same cap at `pipeline_create`.
-
-Raw vectors are the byte-buffer type throughout: outputs are always
-raw vectors; plaintext inputs also accept a single character string
-(converted via `charToRaw`). Objects are environment-backed
-(reference semantics) and carry finalized external pointers, so
-garbage collection releases the Go-side handle when an object goes
-out of scope without an explicit `pipeline_free` / `stream_free`.
-
-Incremental streaming:
-
-```r
-pipe <- pipeline_create("streaming-noaead-triple-v1")
-sess <- stream_encryptor(pipe)
-stream_write(sess, part1)
-stream_write(sess, part2)
-wire <- stream_drain_all(sess)   # end-of-input + drain in one call
-stream_free(sess)
-```
-
-The explicit loop form is `stream_write` / `stream_end` /
-`stream_read`; `stream_read(sess, max)` returns
-`list(chunk = <raw>, finished = <logical>)` and never blocks before
-`stream_end`. The `pump(sess, read_fn, write_fn)` helper moves bytes
-through a session with bounded memory. A stream session holds its
-parent `Pipeline` in the object's `parent` field (and in the external
-pointer's protected slot), so the R garbage collector cannot collect
-the Pipeline while the session is live.
-
-Errors are signalled as R conditions of class `itb_error` (fields
-`status`, `label`, `detail`), so `tryCatch` callers branch on the
-status against the `itb_status` constant list:
-
-```r
-err <- tryCatch(pipeline_create("no-such-profile"),
-                itb_error = function(e) e)
-stopifnot(err$status == itb_status$UNKNOWN_PROFILE)
-```
-
-Options are URL-query strings built with `itb_opts(...)` (snake_case
-keys map onto the Go opts grammar; unknown keys pass through
-verbatim):
-
-```r
-opts <- itb_opts(nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
-pipe <- pipeline_create("streaming-aead-triple-mac-v1", opts = opts)
-```
 
 `profiles()` returns every registered Triple profile name (shipped
 catalogue plus `register` additions), sorted.
@@ -255,14 +255,16 @@ the opts / hex helpers.
 ITB_BENCH_MIN_SEC=1 ./bindings/r/run_bench.sh   # quick smoke
 ```
 
-Single Message encrypt and incremental Streaming encrypt (No MAC
-profiles) at 1 MiB / 16 MiB / 64 MiB, configured through the fleet's
+Single Message encrypt, incremental streaming encrypt and one-shot
+Streaming encrypt (No MAC profiles) at 1 MiB / 16 MiB / 64 MiB,
+configured through the fleet's
 canonical env vars (`ITB_INNER_HASH`, `ITB_KEY_BITS`,
 `ITB_NONCE_BITS`, `ITB_WITH_PARALLAX`, `ITB_WITH_WRAPPER`,
 `ITB_PROFILE`, `ITB_BENCH_MIN_SEC`); the harness caps the Go runtime
 via `set_memory_limit(4 * 1024 * 1024 * 1024)` and `set_gc_percent(100)`.
-See `bindings/BENCH.md` for the fleet-wide configuration authority
-and comparison tables.
+See
+[`bindings/BENCH.md`](https://github.com/everanium/itb/blob/main/bindings/BENCH.md)
+for the fleet-wide configuration authority and comparison tables.
 
 ## itb3 CLI
 
@@ -274,6 +276,26 @@ payloads directly on disk (`-i` / `-o`) or through stdin / stdout,
 rotates outer masters, and inspects stored blobs. See
 [`cmd/itb3/README.md`](https://github.com/everanium/itb/blob/main/cmd/itb3/README.md) for the full
 subcommand reference.
+
+## loop utility
+
+A long-run stress harness under `bindings/r/loop/` holds one Pipeline
+handle for minutes, cycles encrypt → decrypt → compare round-trips
+through it, rotates the outer masters and reopens the handle from its
+session blob on a schedule, and reports whether the process survived
+with every byte intact. It is the binding-side counterpart of the Go
+harness under `tools/loop`: same flags, same round structure, same
+summary in both renderings.
+
+```bash
+./bindings/r/build.sh
+./bindings/r/run_loop.sh --duration 2m --shape both
+```
+
+`./bindings/r/run_loop.sh -h` lists every flag. Concurrency mode:
+**single** — R evaluates on one thread and its C API is not
+re-entrant from another, so `--goroutines` above 1 is clamped to 1 and
+the summary reports the effective count next to the requested one.
 
 ## eitb utility
 
@@ -307,7 +329,7 @@ Single Message versus streaming).
   `register` accepts, the record as the JSON string libitb3 exchanges;
   the package carries no JSON dependency, so decoding into a list is
   left to the caller's library of choice.
-- **Streaming decrypt caveat.** Chunked Streaming AEAD verifies per
+- **Streaming-decrypt caveat.** Chunked Streaming AEAD verifies per
   chunk, so plaintext of verified chunks is released before a later
   chunk can fail authentication.
 - The binding exposes the Triple Pipeline surface only; the Low-Level

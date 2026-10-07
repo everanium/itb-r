@@ -1,6 +1,6 @@
 /*
- * libitb3r.c — R .Call shim over the libitb3 shared library's Triple
- * Pipeline surface (ITB_Triple_*, cmd/cshared).
+ * R .Call shim over the libitb3 shared library's Triple Pipeline surface
+ * (ITB_Triple_*, cmd/cshared).
  *
  * The shim is a thin proxy: every hash-name / MAC-name / cipher-name
  * / profile-name is an opaque string passed through to Go for
@@ -11,6 +11,7 @@
  * Registered .Call entry points (R-facing wrappers live in R/itb.R):
  *
  *   C_r_version()                      -> character(1)
+ *   C_r_drbg_auto_tier()               -> character(1)
  *   C_r_profiles()                     -> character vector (sorted)
  *   C_r_set_memory_limit(num)          -> numeric(1)  previous limit
  *   C_r_set_gc_percent(int)            -> integer(1)  previous percent
@@ -18,6 +19,11 @@
  *   C_r_register(chr, chr)             -> NULL
  *   C_r_lookup(chr)                    -> character(1) profile-record JSON
  *   C_r_now()                          -> numeric(1)  monotonic seconds
+ *   C_r_set_gomaxprocs(int)            -> integer(1)  previous value
+ *   C_r_write_heap_profile(chr)        -> NULL
+ *   C_r_pool_stats_len()               -> integer(1)  slot count
+ *   C_r_pool_stats()                   -> numeric vector of the pool counters
+ *   C_r_hash_names()                   -> character vector (registry order)
  *   C_r_pipeline_create(chr, chr)      -> extptr
  *   C_r_pipeline_load(raw, raw|NULL, raw|NULL)    -> extptr
  *   C_r_pipeline_load_f(chr, raw|NULL, raw|NULL)  -> extptr
@@ -50,12 +56,12 @@
  * session-parent-pin (the R-level half is the object's `parent` field).
  *
  * Errors are signalled as R conditions of class "itb_error" (fields
- * status / label / message) by evaluating the package-internal helper
- * .itb_raise(status, label, message) inside the itb namespace; see
+ * status / detail) by evaluating the package-internal helper
+ * .itb_raise(status, detail) inside the itb namespace; see
  * R/errors.R.
  *
  * Output-buffer discipline: variable-size outputs pre-allocate
- * len + len/4 + 65536 bytes (R_alloc scratch, reclaimed on .Call exit)
+ * len + len/4 + 131072 bytes (R_alloc scratch, reclaimed on .Call exit)
  * and retry once with the exact reported size when the call returns
  * BUFFER_TOO_SMALL with outLen strictly greater than the offered
  * capacity.
@@ -109,62 +115,33 @@ enum {
     ST_INTERNAL = 99,
 };
 
-typedef struct {
-    int code;
-    const char *label; /* human-readable */
-} status_row;
-
-static const status_row STATUS_ROWS[] = {
-    {ST_OK, "ok"},
-    {ST_BAD_HASH, "unknown hash name"},
-    {ST_BAD_KEY_BITS, "invalid key bits"},
-    {ST_BAD_HANDLE, "invalid handle"},
-    {ST_BAD_INPUT, "invalid input"},
-    {ST_BUFFER_TOO_SMALL, "output buffer too small"},
-    {ST_ENCRYPT_FAILED, "encrypt failed"},
-    {ST_DECRYPT_FAILED, "decrypt failed"},
-    {ST_SEED_WIDTH_MIX, "seed width mismatch"},
-    {ST_BAD_MAC, "unknown MAC name or invalid MAC handle"},
-    {ST_MAC_FAILURE, "MAC verification failed"},
-    {ST_BLOB_MALFORMED_RECIPE, "blob profile record invalid"},
-    {ST_RECIPE_PRIMITIVE_UNKNOWN,
-     "blob profile record names a primitive absent from the local registries"},
-    {ST_UNKNOWN_PROFILE, "unknown profile name"},
-    {ST_BLOB_MODE_MISMATCH, "blob mode mismatch"},
-    {ST_BLOB_MALFORMED, "malformed state blob"},
-    {ST_BLOB_VERSION_TOO_NEW, "blob version too new"},
-    {ST_BLOB_TOO_MANY_OPTS, "too many blob export opts"},
-    {ST_STREAM_TRUNCATED, "stream truncated before terminator"},
-    {ST_STREAM_AFTER_FINAL, "stream chunk after terminator"},
-    {ST_TRIPLE_CLOSED, "Triple Pipeline is closed"},
-    {ST_PROFILE_EXISTS, "profile name already registered"},
-    {ST_INTERNAL, "internal error"},
-};
-
-static const char *status_label(int code) {
-    size_t i;
-    for (i = 0; i < sizeof(STATUS_ROWS) / sizeof(STATUS_ROWS[0]); i++) {
-        if (STATUS_ROWS[i].code == code) {
-            return STATUS_ROWS[i].label;
-        }
-    }
-    return "unknown status";
-}
-
 /* ---- error raising ------------------------------------------------ */
 
-/* Copies the ITB_LastError diagnostic (NUL-stripped) into buf. */
-static void last_error(char *buf, size_t cap) {
+/* Returns the ITB_LastError diagnostic (NUL-stripped), or "" when
+ * none was recorded. The storage is R_alloc scratch, valid for the
+ * rest of the .Call. */
+static const char *last_error(void) {
     size_t need = 0;
-    int rc;
-    buf[0] = '\0';
-    rc = ITB_LastError(buf, cap, &need);
-    if (rc != ST_OK) {
-        buf[0] = '\0';
-        return;
+    char *buf;
+    int rc = ITB_LastError(NULL, 0, &need);
+    if (rc != ST_OK && rc != ST_BUFFER_TOO_SMALL) {
+        return "";
     }
-    /* NUL-terminated by libitb3; need counts the trailing NUL. */
-    buf[cap - 1] = '\0';
+    if (need <= 1) {
+        return "";
+    }
+    /* The diagnostic is the only text the condition carries, so its
+     * length is asked of the library rather than guessed: an os
+     * diagnostic naming a path outgrows any buffer picked in advance.
+     * R_alloc scratch is reclaimed on the .Call exit and on the
+     * unwind out of raise_status, so nothing here outlives the call. */
+    buf = R_alloc(need, 1);
+    buf[0] = '\0';
+    if (ITB_LastError(buf, need, &need) != ST_OK) {
+        return "";
+    }
+    buf[need > 0 ? need - 1 : 0] = '\0';
+    return buf;
 }
 
 /* Signals an R condition of class "itb_error" via the package-internal
@@ -172,17 +149,16 @@ static void last_error(char *buf, size_t cap) {
  * helper longjmps past this frame (R restores the protection stack and
  * the R_alloc watermark while unwinding). */
 static void raise_status(int rc) {
-    char msg[2048];
+    const char *msg = last_error();
     SEXP ns, call;
-    last_error(msg, sizeof(msg));
     ns = R_FindNamespace(Rf_mkString("libitb3r"));
     PROTECT(ns);
-    call = PROTECT(Rf_lang4(Rf_install(".itb_raise"), Rf_ScalarInteger(rc),
-                            Rf_mkString(status_label(rc)), Rf_mkString(msg)));
+    call = PROTECT(Rf_lang3(Rf_install(".itb_raise"), Rf_ScalarInteger(rc),
+                            Rf_mkString(msg)));
     Rf_eval(call, ns);
     /* Not reached; belt-and-braces if .itb_raise ever returns. */
     UNPROTECT(2);
-    Rf_error("itb: %s (status %d): %s", status_label(rc), rc, msg);
+    Rf_error("itb: status=%d: %s", rc, msg);
 }
 
 /* ---- argument helpers ---------------------------------------------- */
@@ -258,8 +234,8 @@ static uintptr_t check_handle(SEXP ptr, SEXP tag, const char *what) {
 
 /* Pre-allocation formula for message / one-shot stream outputs. */
 static size_t out_cap(size_t payload) {
-    size_t cap = payload + payload / 4 + 65536;
-    return cap < 65536 ? 65536 : cap;
+    size_t cap = payload + payload / 4 + 131072;
+    return cap < 131072 ? 131072 : cap;
 }
 
 typedef int (*cipher_fn)(uintptr_t, void *, size_t, void *, size_t, size_t *);
@@ -378,6 +354,28 @@ SEXP C_r_version(void) {
     return Rf_mkString(buf);
 }
 
+/* The fill cipher the auto DRBG tier selected on this host
+ * ("aes-256-ctr" or "chacha20"): the tier a Pipeline uses when its
+ * drbg option is empty, resolved per host and recorded in no blob. */
+SEXP C_r_drbg_auto_tier(void) {
+    size_t need = 0;
+    int rc = ITB_DRBGAutoTier(NULL, 0, &need);
+    char *buf;
+    if (rc != ST_OK && rc != ST_BUFFER_TOO_SMALL) {
+        raise_status(rc);
+    }
+    if (need <= 1) {
+        return Rf_mkString("");
+    }
+    buf = R_alloc(need, 1);
+    rc = ITB_DRBGAutoTier(buf, need, &need);
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    buf[need > 0 ? need - 1 : 0] = '\0';
+    return Rf_mkString(buf);
+}
+
 static int profiles_thunk(void *ctx, void *out, size_t cap, size_t *n) {
     (void)ctx;
     return ITB_Triple_Profiles(out, cap, n);
@@ -475,6 +473,102 @@ SEXP C_r_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return Rf_ScalarReal((double)ts.tv_sec + (double)ts.tv_nsec * 1e-9);
+}
+
+/* Sets GOMAXPROCS and returns the previous value; n <= 0 queries
+ * without changing, so a caller reads the effective value the same way
+ * it sets one. ITB_GOMAXPROCS in the environment applies at library
+ * load time and a query leaves it standing. */
+SEXP C_r_set_gomaxprocs(SEXP n) {
+    return Rf_ScalarInteger(ITB_SetGOMAXPROCS(arg_int(n, "n")));
+}
+
+/* Writes a Go runtime heap profile (pprof format) to path after one
+ * forced collection. */
+SEXP C_r_write_heap_profile(SEXP path) {
+    int rc = ITB_WriteHeapProfile(MUT(arg_string(path, "path")));
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    return R_NilValue;
+}
+
+/* Number of int64 slots C_r_pool_stats fills. */
+SEXP C_r_pool_stats_len(void) {
+    return Rf_ScalarInteger(ITB_PoolStatsLen());
+}
+
+/* The shared library's pool counters, one numeric per slot. Every
+ * counter is a monotonically increasing total since library load; a
+ * caller differences two snapshots. The vector is sized from
+ * ITB_PoolStatsLen rather than from a constant, because the slot count
+ * follows the number of hash-array pool tiers the library ships.
+ *
+ * R-specific. The counters are int64 and R carries no 64-bit integer
+ * vector, so they land in a double vector. The largest of them are
+ * byte totals, which stay exact to 2^53 — roughly nine petabytes, well
+ * past anything a run accumulates. */
+SEXP C_r_pool_stats(void) {
+    int want = ITB_PoolStatsLen();
+    size_t cap, n = 0, i;
+    int64_t *buf;
+    int rc;
+    SEXP out;
+    if (want <= 0) {
+        return Rf_allocVector(REALSXP, 0);
+    }
+    cap = (size_t)want;
+    /* R_alloc scratch is reclaimed when this .Call frame exits, error
+     * unwinds included, so the vector the library writes into cannot
+     * outlive the call that asked for it. */
+    buf = (int64_t *)R_alloc(cap, sizeof(int64_t));
+    rc = ITB_PoolStats(buf, cap, &n);
+    if (rc != ST_OK) {
+        raise_status(rc);
+    }
+    if (n > cap) {
+        n = cap;
+    }
+    out = PROTECT(Rf_allocVector(REALSXP, (R_xlen_t)n));
+    for (i = 0; i < n; i++) {
+        REAL(out)[i] = (double)buf[i];
+    }
+    UNPROTECT(1);
+    return out;
+}
+
+static int hash_names_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    (void)ctx;
+    return ITB_Triple_HashNames(out, cap, n);
+}
+
+/* Every shipped inner-hash primitive name, in registry order. libitb3
+ * writes a JSON array of strings; primitive names are restricted to
+ * [a-z0-9-] so the array unpacks by scanning the quoted items, exactly
+ * as C_r_profiles does. */
+SEXP C_r_hash_names(void) {
+    size_t len = 0;
+    const char *json = buf_call(hash_names_thunk, NULL, JSON_CAP, &len);
+    const char *end = json + len;
+    const char *p;
+    int count = 0, i = 0;
+    SEXP out;
+    for (p = json; p < end; p++) {
+        if (*p == '"') count++;
+    }
+    out = PROTECT(Rf_allocVector(STRSXP, count / 2));
+    p = json;
+    while (p < end && i < count / 2) {
+        const char *q = memchr(p, '"', (size_t)(end - p));
+        const char *e;
+        if (q == NULL) break;
+        e = memchr(q + 1, '"', (size_t)(end - (q + 1)));
+        if (e == NULL) break;
+        SET_STRING_ELT(out, i++, Rf_mkCharLen(q + 1, (int)(e - (q + 1))));
+        p = e + 1;
+    }
+    UNPROTECT(1);
+    return out;
 }
 
 /* ---- Pipeline lifecycle ---------------------------------------------- */
@@ -842,6 +936,7 @@ SEXP C_r_stream_free(SEXP ptr) {
 
 static const R_CallMethodDef CALL_DEFS[] = {
     CALLDEF(C_r_version, 0),
+    CALLDEF(C_r_drbg_auto_tier, 0),
     CALLDEF(C_r_profiles, 0),
     CALLDEF(C_r_set_memory_limit, 1),
     CALLDEF(C_r_set_gc_percent, 1),
@@ -849,6 +944,11 @@ static const R_CallMethodDef CALL_DEFS[] = {
     CALLDEF(C_r_register, 2),
     CALLDEF(C_r_lookup, 1),
     CALLDEF(C_r_now, 0),
+    CALLDEF(C_r_set_gomaxprocs, 1),
+    CALLDEF(C_r_write_heap_profile, 1),
+    CALLDEF(C_r_pool_stats_len, 0),
+    CALLDEF(C_r_pool_stats, 0),
+    CALLDEF(C_r_hash_names, 0),
     CALLDEF(C_r_pipeline_create, 2),
     CALLDEF(C_r_pipeline_load, 3),
     CALLDEF(C_r_pipeline_load_f, 3),

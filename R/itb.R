@@ -1,5 +1,5 @@
-# itb.R — public R API over the itb C shim (src/libitb3r.c), which in
-# turn proxies the libitb3 shared library's Triple Pipeline surface
+# Public R API over the itb C shim (src/libitb3r.c), which in turn
+# proxies the libitb3 shared library's Triple Pipeline surface
 # (ITB_Triple_*, cmd/cshared).
 #
 # The binding is a thin proxy: every hash-name / MAC-name /
@@ -71,6 +71,14 @@ version <- function() {
   .Call(C_r_version)
 }
 
+#' Fill cipher the auto DRBG tier selected on this host ("aes-256-ctr"
+#' or "chacha20"): the tier a Pipeline uses when its drbg option is
+#' empty, resolved per host and recorded in no blob.
+#' @export
+drbg_auto_tier <- function() {
+  .Call(C_r_drbg_auto_tier)
+}
+
 #' Sorted character vector of every registered Triple profile name
 #' (the shipped catalogue plus `register` additions).
 #' @export
@@ -126,6 +134,46 @@ itb_now <- function() {
   .Call(C_r_now)
 }
 
+#' Sets the Go runtime's GOMAXPROCS; returns the previous value.
+#' Values at or below zero query without changing.
+#' @export
+set_gomaxprocs <- function(n) {
+  .Call(C_r_set_gomaxprocs, as.integer(n))
+}
+
+#' Writes a Go runtime heap profile (pprof format) to `path` after one
+#' forced collection. Raises `itb_error` when the path cannot be
+#' written.
+#' @export
+write_heap_profile <- function(path) {
+  invisible(.Call(C_r_write_heap_profile, path))
+}
+
+#' Number of slots `pool_stats` returns.
+#' @export
+pool_stats_len <- function() {
+  .Call(C_r_pool_stats_len)
+}
+
+#' The shared library's pool counters as a numeric vector, one entry
+#' per slot. Every counter is a monotonically increasing total since
+#' library load, so a caller differences two snapshots. Slot 1 carries
+#' the hash-array tier count T, tier i occupies the five slots from
+#' 2 + 5 * i, and the scratch byte pool and the parallax chunk pool
+#' occupy the eight slots from 2 + 5 * T. Size a buffer from
+#' `pool_stats_len`, never from a constant.
+#' @export
+pool_stats <- function() {
+  .Call(C_r_pool_stats)
+}
+
+#' Character vector of every shipped inner-hash primitive name, in
+#' registry order. A name outside it is one libitb3 rejects.
+#' @export
+hash_names <- function() {
+  .Call(C_r_hash_names)
+}
+
 # ---- opts builder ------------------------------------------------------
 
 # Snake_case keys map onto the Go opts grammar; any key not in the map
@@ -142,6 +190,7 @@ itb_now <- function() {
   mac_name = "macName",
   inner_hash = "innerHash",
   outer_cipher = "outerCipher",
+  drbg = "drbg",
   parallax_palette = "parallaxPalette",
   perm_master = "pm",
   wrap_master = "wm"
@@ -174,11 +223,12 @@ itb_now <- function() {
 
 #' Builds the URL-query opts string consumed by `pipeline_create` from
 #' named arguments (or a single named list). (Profile registration
-#' takes a JSON record — see `register` — not an opts string.) No validation is performed here — every key and
-#' value passes through to Go verbatim (percent-encoded); libitb3
-#' rejects unknown keys or bad values with a diagnostic surfaced
-#' through the `itb_error` condition. Keys are emitted in sorted order
-#' so the rendered string is deterministic.
+#' takes a JSON record — see `register` — not an opts string.)
+#' No validation is performed here — every key and value passes
+#' through to Go verbatim (percent-encoded); libitb3 rejects unknown
+#' keys or bad values with a diagnostic surfaced through the
+#' `itb_error` condition. Keys are emitted in sorted order so the
+#' rendered string is deterministic.
 #' @export
 itb_opts <- function(...) {
   args <- list(...)
@@ -316,7 +366,7 @@ pipeline_decrypt_message <- function(pipe, wire) {
   .Call(C_r_pipeline_decrypt_message, pipe$ptr, .as_bytes(wire, "wire"))
 }
 
-#' Whole-buffer Streaming encrypt (the entire stream in one call).
+#' One-shot streaming encrypt (the entire stream in one call).
 #' @export
 pipeline_encrypt_stream_one_shot <- function(pipe, plaintext) {
   .check_pipeline(pipe)
@@ -326,7 +376,7 @@ pipeline_encrypt_stream_one_shot <- function(pipe, plaintext) {
   )
 }
 
-#' Whole-buffer Streaming decrypt (the entire wire in one call).
+#' One-shot streaming decrypt (the entire wire in one call).
 #' @export
 pipeline_decrypt_stream_one_shot <- function(pipe, wire) {
   .check_pipeline(pipe)
@@ -367,13 +417,13 @@ pipeline_free <- function(pipe) {
 
 # ---- stream sessions ---------------------------------------------------
 
-#' Opens an incremental Streaming encrypt session on the Pipeline.
+#' Opens an incremental streaming encrypt session on the Pipeline.
 #' @export
 stream_encryptor <- function(pipe) {
   .new_stream(pipe, TRUE)
 }
 
-#' Opens an incremental Streaming decrypt session on the Pipeline.
+#' Opens an incremental streaming decrypt session on the Pipeline.
 #' @export
 stream_decryptor <- function(pipe) {
   .new_stream(pipe, FALSE)

@@ -1,11 +1,11 @@
-# itb_eitb.R — command-line demonstrator for the ITB R binding.
+# Command-line demonstrator for the ITB R binding.
 #
 # Subcommands:
 #
-#     itb_eitb.R version                                library + binding versions
-#     itb_eitb.R profiles                               registered profile catalogue
-#     itb_eitb.R inspect <blob-hex>                     profile record of a blob
-#     itb_eitb.R encrypt <profile> <in-file> <out-file> Single Message encrypt
+#     itb_eitb.R version
+#     itb_eitb.R profiles
+#     itb_eitb.R inspect <blob-hex>
+#     itb_eitb.R encrypt <profile> <in-file> <out-file>
 #     itb_eitb.R decrypt <profile> <blob-hex> <in-file> <out-file>
 #
 # `encrypt` prints the session blob (`pipeline_save`) to stderr as
@@ -14,6 +14,7 @@
 # routes Single Message versus streaming). `profiles` lists the
 # registered profile catalogue one name per line; the profiles that
 # carry a cipher surface are the ones `encrypt` / `decrypt` accept.
+# `inspect` prints the profile record a blob carries.
 
 suppressMessages(library(libitb3r))
 

@@ -1,6 +1,6 @@
-# bench.R — micro-benchmarks for the ITB R binding.
+# Micro-benchmarks for the ITB R binding.
 #
-# Single Message encrypt and incremental Streaming encrypt throughput
+# Single Message encrypt and incremental streaming encrypt throughput
 # at 1 MiB / 16 MiB / 64 MiB. Wall-clock via the binding's monotonic
 # itb_now() (proc.time()'s user+sys over-count the Go runtime's worker
 # threads); output is a fixed-width table:
@@ -149,9 +149,9 @@ stream_dec_pass <- function(pipe, wire, scratch) {
 }
 
 main <- function() {
-  # Bench-scale allocation churn leaks Go scratch heap unboundedly
-  # without a soft memory cap + aggressive GC; the return values
-  # report the previous settings, not an error.
+  # Bench-scale allocation churn grows the Go scratch heap
+  # unboundedly without a soft memory cap + aggressive GC; the
+  # return values report the previous settings, not an error.
   set_memory_limit(4 * 1024 * 1024 * 1024)
   set_gc_percent(100)
 
@@ -189,7 +189,7 @@ main <- function() {
   }
   pipeline_free(pipe)
 
-  # Whole-buffer stream: one FFI round trip through
+  # One-shot stream: one FFI round trip through
   # pipeline_encrypt_stream_one_shot / pipeline_decrypt_stream_one_shot
   # per iteration.
   pipe <- pipeline_create(profile_env("ITB_STREAM_PROFILE", "streaming-noaead-triple-v1"), opts = opts)

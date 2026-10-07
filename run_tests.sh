@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# run_tests.sh -- one-step test runner for the R binding. Builds and
-# installs the package via build.sh, then runs the testthat suite.
-# testthat must be installed (see README.md "Prerequisites").
+# One-step test runner for the R binding. Builds and installs the
+# package via build.sh, then runs the testthat suite. testthat must
+# be installed (see README.md "Prerequisites").
 #
 # Usage:
 #   ./run_tests.sh

@@ -1,11 +1,10 @@
-# errors.R — condition class for the ITB R binding.
+# Condition class for the ITB R binding.
 #
 # Every libitb3 failure surfaces as a condition of class
-# c("itb_error", "error", "condition") carrying three extra fields:
+# c("itb_error", "error", "condition") carrying two extra fields:
 #
 #   status  integer status code (see the `itb_status` constant list)
-#   label   short human-readable status label
-#   detail  the ITB_LastError diagnostic string ("" when absent)
+#   detail  the ITB_LastError diagnostic string
 #
 # Callers branch on the status:
 #
@@ -43,19 +42,13 @@ itb_status <- list(
 # Internal: called from the C shim (src/libitb3r.c raise_status) to signal
 # a classed condition. Not exported; the leading dot keeps it out of
 # casual completion.
-.itb_raise <- function(status, label, detail) {
-  msg <- if (nzchar(detail)) {
-    sprintf("itb: %s (status %d): %s", label, status, detail)
-  } else {
-    sprintf("itb: %s (status %d)", label, status)
-  }
+.itb_raise <- function(status, detail) {
   stop(structure(
     class = c("itb_error", "error", "condition"),
     list(
-      message = msg,
+      message = sprintf("itb: status=%d: %s", status, detail),
       call = sys.call(-1),
       status = as.integer(status),
-      label = label,
       detail = detail
     )
   ))

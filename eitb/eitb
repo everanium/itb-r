@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# eitb -- launcher for the eitb CLI. Builds and installs the R package
-# on first use (or after a clean), then forwards every argument to the
+# Launcher for the eitb CLI. Builds and installs the R package on
+# first use (or after a clean), then forwards every argument to the
 # Rscript entry point.
 
 set -eu

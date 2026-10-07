@@ -1,4 +1,4 @@
-# test-itb.R — testthat suite for the ITB R binding.
+# testthat suite for the ITB R binding.
 
 library(libitb3r)
 
@@ -21,8 +21,7 @@ expect_itb_status <- function(expr, expected) {
   expect_false(is.null(err), label = "expected an itb_error, got success")
   expect_true(err$status %in% expected,
     label = sprintf(
-      "unexpected status %d (%s): %s",
-      err$status, err$label, conditionMessage(err)
+      "unexpected status %d: %s", err$status, conditionMessage(err)
     )
   )
   expect_gt(nchar(conditionMessage(err)), 0)
@@ -34,6 +33,10 @@ test_that("version reports library and binding versions", {
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
   expect_equal(as.character(utils::packageVersion("libitb3r")), "0.5.1")
+})
+
+test_that("drbg_auto_tier names a fill cipher", {
+  expect_true(drbg_auto_tier() %in% c("aes-256-ctr", "chacha20"))
 })
 
 test_that("profiles lists the registered Triple profiles", {
@@ -166,7 +169,7 @@ test_that("unknown profile maps to UNKNOWN_PROFILE", {
     pipeline_create("no-such-profile"),
     itb_status$UNKNOWN_PROFILE
   )
-  expect_equal(err$label, "unknown profile name")
+  expect_gt(nchar(err$detail), 0)
   expect_s3_class(err, "itb_error")
 })
 
@@ -465,5 +468,124 @@ test_that("stream_read_into rejects an unusable scratch buffer", {
   expect_error(stream_read_into(enc, raw(0)), "non-empty")
   expect_error(stream_read_into(enc, 1:4), "raw vector")
   stream_free(enc)
+  pipeline_free(pipe)
+})
+
+test_that("hash_names enumerates the shipped hash registry", {
+  got <- hash_names()
+  expect_type(got, "character")
+  expect_gt(length(got), 0)
+  for (want in c("areion512", "blake3", "aesitb128")) {
+    expect_true(want %in% got, label = sprintf("missing hash primitive %s", want))
+  }
+  # The enumeration is what a caller validates a name against, so a
+  # name outside it must be one libitb3 rejects.
+  expect_false("nosuchhash" %in% got)
+  expect_itb_status(
+    pipeline_create("singlemsg-triple-mac-v1",
+      itb_opts(inner_hash = "nosuchhash")),
+    c(itb_status$BAD_HASH, itb_status$BAD_INPUT, itb_status$INTERNAL)
+  )
+})
+
+test_that("set_gomaxprocs sets and queries", {
+  before <- set_gomaxprocs(0L)
+  expect_type(before, "integer")
+  expect_gt(before, 0L)
+  expect_identical(set_gomaxprocs(2L), before)
+  expect_identical(set_gomaxprocs(0L), 2L)
+  set_gomaxprocs(before)
+  expect_identical(set_gomaxprocs(0L), before)
+})
+
+test_that("write_heap_profile writes a pprof profile", {
+  path <- tempfile(fileext = ".prof")
+  on.exit(unlink(path), add = TRUE)
+  write_heap_profile(path)
+  expect_true(file.exists(path))
+  expect_gt(file.size(path), 0)
+  # pprof output is a gzip stream.
+  magic <- readBin(path, "raw", 2L)
+  expect_identical(magic, as.raw(c(0x1f, 0x8b)))
+  expect_itb_status(
+    write_heap_profile("/nonexistent-directory-for-itb-tests/heap.prof"),
+    itb_status$BAD_INPUT
+  )
+})
+
+test_that("pool_stats reports the library's pool counters", {
+  want <- pool_stats_len()
+  expect_type(want, "integer")
+  expect_gt(want, 0L)
+  first <- pool_stats()
+  expect_length(first, want)
+  # Slot 1 carries the hash-array tier count, and the vector holds five
+  # slots per tier plus the eight slots of the two byte pools.
+  tiers <- first[1]
+  expect_gt(tiers, 0)
+  expect_identical(1 + 5 * tiers + 8, as.numeric(want))
+  # The counters are monotonic totals since library load, so work done
+  # between two snapshots can only raise them.
+  pipe <- pipeline_create("singlemsg-triple-mac-v1")
+  on.exit(pipeline_free(pipe), add = TRUE)
+  plain <- payload(64 * 1024, 3)
+  expect_identical(
+    pipeline_decrypt_message(pipe, pipeline_encrypt_message(pipe, plain)), plain)
+  second <- pool_stats()
+  expect_true(all(second >= first))
+  expect_true(any(second > first))
+})
+
+test_that("drbg round trip through a loaded blob", {
+  for (name in c("csprng", "aesitb128")) {
+    sender <- pipeline_create("singlemsg-triple-mac-v1",
+      opts = itb_opts(drbg = name)
+    )
+    receiver <- pipeline_load(pipeline_save(sender))
+    plain <- charToRaw(paste("drbg", name))
+    expect_identical(
+      pipeline_decrypt_message(receiver, pipeline_encrypt_message(sender, plain)),
+      plain
+    )
+    back <- charToRaw(paste("reverse", name))
+    expect_identical(
+      pipeline_decrypt_message(sender, pipeline_encrypt_message(receiver, back)),
+      back
+    )
+    pipeline_free(receiver)
+    pipeline_free(sender)
+  }
+})
+
+test_that("drbg inspect, default and unknown name", {
+  pipe <- pipeline_create("singlemsg-triple-mac-v1",
+    opts = itb_opts(drbg = "csprng")
+  )
+  expect_true(grepl('"drbg":"csprng"', inspect(pipeline_save(pipe)), fixed = TRUE))
+  pipeline_free(pipe)
+  # With no drbg set the record carries no drbg key, and no shipped
+  # profile names one.
+  plain <- pipeline_create("singlemsg-triple-mac-v1")
+  expect_false(grepl('"drbg":', inspect(pipeline_save(plain)), fixed = TRUE))
+  pipeline_free(plain)
+  expect_false(grepl('"drbg":', lookup("singlemsg-triple-mac-v1"), fixed = TRUE))
+  err <- expect_itb_status(
+    pipeline_create("singlemsg-triple-mac-v1", opts = itb_opts(drbg = "nope")),
+    itb_status$RECIPE_PRIMITIVE_UNKNOWN
+  )
+  expect_true(grepl("nope", conditionMessage(err), fixed = TRUE))
+})
+
+test_that("drbg survives a register copy", {
+  pipe <- pipeline_create("singlemsg-triple-mac-v1",
+    opts = itb_opts(drbg = "csprng")
+  )
+  # The inspection-only fields are dropped; drbg is a recipe field and
+  # stays in the registered copy.
+  record <- inspect(pipeline_save(pipe))
+  record <- gsub('"name":"[^"]*",?', "", record)
+  record <- gsub('"(nonce_bits|barrier_fill|container_mode)":[0-9]+,?', "", record)
+  register("r-binding-test-drbg-copy", record)
+  expect_true(grepl('"drbg":"csprng"', lookup("r-binding-test-drbg-copy"), fixed = TRUE))
   pipeline_free(pipe)
 })
