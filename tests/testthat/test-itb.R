@@ -32,7 +32,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.5.1")
+  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.5.5")
 })
 
 test_that("drbg_auto_tier names a fill cipher", {

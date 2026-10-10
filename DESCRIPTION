@@ -1,7 +1,7 @@
 Package: libitb3r
 Type: Package
 Title: ITB Symmetric Cipher Construction with Ambiguity-Based Security - R
-Version: 0.5.1
+Version: 0.5.5
 Authors@R: person("Andrey", "Kuvshinov", email = "andrew@encloud.blue",
     role = c("aut", "cre"))
 Description: Thin proxy over the libitb3 shared library's Triple
