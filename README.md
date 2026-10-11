@@ -95,7 +95,7 @@ shape is written into the blob, so the receiver loads it with no opts
 of its own:
 
 ```r
-opts <- itb_opts(chunk_size = 65536, with_wrapper = FALSE)
+opts <- itb_opts(mode = 2, chunk_size = 65536, with_wrapper = FALSE)
 sender <- pipeline_create("singlemsg-triple-mac-v1", opts = opts)
 receiver <- pipeline_load(pipeline_save(sender))
 ```
@@ -153,7 +153,7 @@ keys map onto the Go opts grammar; unknown keys pass through
 verbatim):
 
 ```r
-opts <- itb_opts(nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
+opts <- itb_opts(mode = 2, nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
 pipe <- pipeline_create("streaming-aead-triple-mac-v1", opts = opts)
 ```
 

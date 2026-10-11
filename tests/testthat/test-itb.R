@@ -32,7 +32,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.5.5")
+  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.5.6")
 })
 
 test_that("drbg_auto_tier names a fill cipher", {
@@ -315,10 +315,19 @@ test_that("inspect carries recipe plus inspection-only fields", {
   expect_true(grepl('"mode":"singlemsg-mac"', record, fixed = TRUE))
   expect_true(grepl('"nonce_bits":', record, fixed = TRUE))
   expect_true(grepl('"barrier_fill":', record, fixed = TRUE))
+  expect_true(grepl('"container_mode":1', record, fixed = TRUE))
   expect_true(grepl('"name":"singlemsg-triple-mac-v1"', looked, fixed = TRUE))
   expect_false(grepl('"nonce_bits":', looked, fixed = TRUE))
   expect_false(grepl('"barrier_fill":', looked, fixed = TRUE))
+  expect_false(grepl('"container_mode":', looked, fixed = TRUE))
   expect_itb_status(inspect("not a blob"), itb_status$BAD_INPUT)
+  pipeline_free(pipe)
+})
+
+test_that("inspect carries container_mode override", {
+  pipe <- pipeline_create("singlemsg-triple-mac-v1", itb_opts(mode = 2L))
+  record <- inspect(pipeline_save(pipe))
+  expect_true(grepl('"container_mode":2', record, fixed = TRUE))
   pipeline_free(pipe)
 })
 

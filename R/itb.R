@@ -22,7 +22,7 @@
 # Pipeline's external pointer in its protected slot, pinning at the C
 # level as well.
 
-ITB_R_VERSION <- "0.5.5"
+ITB_R_VERSION <- "0.5.6"
 
 # ---- internal helpers -------------------------------------------------
 
@@ -179,6 +179,7 @@ hash_names <- function() {
 # Snake_case keys map onto the Go opts grammar; any key not in the map
 # passes through unchanged.
 .OPTS_KEY_MAP <- c(
+  mode = "mode",
   nonce_bits = "nonceBits",
   key_bits = "keyBits",
   with_parallax = "withParallax",

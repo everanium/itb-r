@@ -555,37 +555,6 @@ log_pipeline_initialised <- function(profile, blob) {
   invisible(NULL)
 }
 
-# Returns a copy of a wrap-layer session blob whose inner blob's "mode"
-# field is set to target_mode (1 = per-region, 2 = per-container), or
-# NULL when the inner blob or its mode field is not found. The wrap
-# layer's profile record carries its own "mode" (a string), so the
-# search starts at the inner blob ("ib"); both shipped modes are one
-# digit wide, so the blob length does not change and nothing before the
-# inner blob is touched. The edit is a byte replacement on the raw
-# vector, the same reading the profile-record probes use, so the
-# integers and base64 fields of the blob are never re-rendered.
-edit_inner_blob_mode <- function(blob, target_mode) {
-  ib <- grepRaw('"ib":{', blob, fixed = TRUE)
-  if (length(ib) == 0L) {
-    return(NULL)
-  }
-  off <- ib + nchar('"ib":{')
-  rel <- grepRaw('"mode":', blob, offset = off, fixed = TRUE)
-  if (length(rel) == 0L) {
-    return(NULL)
-  }
-  at <- rel + nchar('"mode":')
-  if (at + 1L > length(blob)) {
-    return(NULL)
-  }
-  digit <- as.integer(blob[at])
-  nxt <- as.integer(blob[at + 1L])
-  if (digit < 0x31L || digit > 0x32L || (nxt >= 0x30L && nxt <= 0x39L)) {
-    return(NULL)
-  }
-  blob[at] <- as.raw(0x30L + target_mode)
-  blob
-}
 
 # Folds a keystream primitive into opts for any layer the named profile
 # leaves unfilled but the operator asked for.
@@ -638,6 +607,7 @@ fill_keystream_layers <- function(name, opts, want_parallax, want_wrapper) {
 # use the retained blob; save is never called again.
 build_pipeline <- function(cfg, profile) {
   opts <- list(
+    mode = cfg$blob_mode,
     inner_hash = cfg$hash,
     mac_name = cfg$mac,
     with_parallax = cfg$parallax,
@@ -677,27 +647,6 @@ build_pipeline <- function(cfg, profile) {
     })
   if (is.null(blob)) {
     return(NULL)
-  }
-  if (cfg$blob_mode == 2) {
-    # The sizing mode is not an Opts knob: the Init blob is edited and
-    # the pipeline reopened from it, so the retained blob (the one
-    # blob-cycle reopens from) carries the edited mode.
-    edited <- edit_inner_blob_mode(blob, 2L)
-    if (is.null(edited)) {
-      err_line("rewrite blob mode: inner blob mode field not found")
-      libitb3r::pipeline_free(pipe)
-      return(NULL)
-    }
-    libitb3r::pipeline_free(pipe)
-    pipe <- tryCatch(libitb3r::pipeline_load(edited),
-      error = function(e) {
-        err_line(sprintf("reload Mode 2 blob: %s", status_detail(e)))
-        NULL
-      })
-    if (is.null(pipe)) {
-      return(NULL)
-    }
-    blob <- edited
   }
   log_pipeline_initialised(profile, blob)
   list(pipe = pipe, blob = blob)
