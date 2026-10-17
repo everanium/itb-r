@@ -20,6 +20,8 @@ export(to_hex)
 export(from_hex)
 
 export(pipeline_create)
+export(pipeline_create_keys)
+export(pipeline_init_keys)
 export(pipeline_load)
 export(pipeline_load_f)
 export(pipeline_save)

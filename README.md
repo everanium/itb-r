@@ -12,7 +12,7 @@ Thin proxy over the libitb3 shared library's `ITB_Triple_*` surface
 shim links `libitb3.so` directly, and every hash-name / MAC-name /
 cipher-name / profile-name is an opaque string passed through to Go
 for validation — the binding carries no ITB construction logic. The
-public surface is a `Pipeline` object (create / load / load_f / save
+public surface is a `Pipeline` object (create / create_keys / load / load_f / save
 / save_f / rekey / max_workers / close,
 Single Message encrypt / decrypt, one-shot and incremental stream
 sessions), an opts query-string builder for `pipeline_create`, the
@@ -99,6 +99,8 @@ opts <- itb_opts(mode = 2, chunk_size = 65536, with_wrapper = FALSE)
 sender <- pipeline_create("singlemsg-triple-mac-v1", opts = opts)
 receiver <- pipeline_load(pipeline_save(sender))
 ```
+
+`pipeline_create_keys(profile, masters, opts = NULL)` constructs a session from caller-supplied master keys (`8` keys when neither Parallax nor the Wrapper is active, `9` when one is, `10` when both are, each 16–64 bytes and pairwise distinct) instead of drawing from the library CSPRNG.
 
 `pipeline_rekey` rotates the parallax + wrapper masters mid-session
 (the eight ITB seeds and MAC key are fixed for the session lifetime

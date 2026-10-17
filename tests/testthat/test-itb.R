@@ -32,7 +32,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.7.2")
+  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.7.3")
 })
 
 test_that("drbg_auto_tier names a fill cipher", {
@@ -231,6 +231,35 @@ test_that("rekey refreshes the blob", {
   )
   pipeline_free(receiver)
   pipeline_free(sender)
+})
+
+test_that("pipeline_create_keys is deterministic and propagates BAD_INPUT", {
+  opts <- itb_opts(with_parallax = FALSE, with_wrapper = FALSE)
+  masters <- lapply(1:8, function(i) as.raw(rep(0x11L * i, 32L)))
+  p1 <- pipeline_create_keys("singlemsg-triple-mac-v1", masters, opts = opts)
+  p2 <- pipeline_create_keys("singlemsg-triple-mac-v1", masters, opts = opts)
+  expect_identical(pipeline_save(p1), pipeline_save(p2))
+  wire <- pipeline_encrypt_message(p1, "deterministic keys")
+  expect_identical(
+    rawToChar(pipeline_decrypt_message(p2, wire)),
+    "deterministic keys"
+  )
+  pipeline_free(p2)
+  pipeline_free(p1)
+
+  dup <- masters
+  dup[[8]] <- dup[[1]]
+  expect_itb_status(
+    pipeline_create_keys("singlemsg-triple-mac-v1", dup, opts = opts),
+    itb_status$BAD_INPUT
+  )
+
+  short <- masters
+  short[[1]] <- as.raw(rep(0xAAL, 8L))
+  expect_itb_status(
+    pipeline_create_keys("singlemsg-triple-mac-v1", short, opts = opts),
+    itb_status$BAD_INPUT
+  )
 })
 
 test_that("register round trip and duplicate", {

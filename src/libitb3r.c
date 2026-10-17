@@ -25,6 +25,7 @@
  *   C_r_pool_stats()                   -> numeric vector of the pool counters
  *   C_r_hash_names()                   -> character vector (registry order)
  *   C_r_pipeline_create(chr, chr)      -> extptr
+ *   C_r_pipeline_create_keys(chr, list, chr) -> extptr
  *   C_r_pipeline_load(raw, raw|NULL, raw|NULL)    -> extptr
  *   C_r_pipeline_load_f(chr, raw|NULL, raw|NULL)  -> extptr
  *   C_r_pipeline_save(extptr)          -> raw (current blob)
@@ -599,6 +600,73 @@ SEXP C_r_pipeline_create(SEXP profile, SEXP opts) {
     return make_handle(c.handle, PIPE_TAG, R_NilValue, pipe_finalizer);
 }
 
+typedef struct {
+    const char *profile;
+    const char *opts;
+    uint8_t *flat;
+    size_t total_len;
+    size_t *lens;
+    size_t count;
+    uintptr_t handle;
+    int attempt;
+} init_keys_ctx;
+
+static int init_keys_thunk(void *ctx, void *out, size_t cap, size_t *n) {
+    init_keys_ctx *c = (init_keys_ctx *)ctx;
+    int rc = ITB_Triple_InitKeys(MUT(c->profile), MUT(c->opts), c->flat,
+                                 c->total_len, c->lens, c->count, out, cap, n,
+                                 &c->handle);
+    if (c->flat != NULL &&
+        !(rc == ST_BUFFER_TOO_SMALL && *n > cap && c->attempt == 0)) {
+        memset(c->flat, 0, c->total_len);
+    }
+    c->attempt++;
+    return rc;
+}
+
+/* Session against the named profile from caller-supplied master keys
+ * (ITB_Triple_InitKeys). */
+SEXP C_r_pipeline_create_keys(SEXP profile, SEXP masters, SEXP opts) {
+    init_keys_ctx c;
+    size_t len = 0, i, off;
+    c.profile = arg_string(profile, "profile");
+    if (TYPEOF(masters) != VECSXP) {
+        Rf_error("itb: masters must be a list of raw vectors");
+    }
+    c.opts = arg_string(opts, "opts");
+    c.count = (size_t)XLENGTH(masters);
+    c.total_len = 0;
+    c.flat = NULL;
+    c.lens = NULL;
+    c.handle = 0;
+    c.attempt = 0;
+
+    if (c.count > 0) {
+        c.lens = (size_t *)R_alloc(c.count, sizeof(size_t));
+        for (i = 0; i < c.count; i++) {
+            size_t klen = 0;
+            arg_raw(VECTOR_ELT(masters, (R_xlen_t)i), &klen, "master key");
+            c.lens[i] = klen;
+            c.total_len += klen;
+        }
+    }
+    if (c.total_len > 0) {
+        c.flat = (uint8_t *)R_alloc(c.total_len, 1);
+        off = 0;
+        for (i = 0; i < c.count; i++) {
+            size_t klen = 0;
+            const Rbyte *k =
+                arg_raw(VECTOR_ELT(masters, (R_xlen_t)i), &klen, "master key");
+            if (klen > 0) {
+                memcpy(c.flat + off, k, klen);
+                off += klen;
+            }
+        }
+    }
+    buf_call(init_keys_thunk, &c, BLOB_CAP, &len);
+    return make_handle(c.handle, PIPE_TAG, R_NilValue, pipe_finalizer);
+}
+
 /* Reopens a session from blob bytes; the blob's embedded profile
  * record is the sole structural source. */
 SEXP C_r_pipeline_load(SEXP blob, SEXP perm, SEXP wrap) {
@@ -950,6 +1018,7 @@ static const R_CallMethodDef CALL_DEFS[] = {
     CALLDEF(C_r_pool_stats, 0),
     CALLDEF(C_r_hash_names, 0),
     CALLDEF(C_r_pipeline_create, 2),
+    CALLDEF(C_r_pipeline_create_keys, 3),
     CALLDEF(C_r_pipeline_load, 3),
     CALLDEF(C_r_pipeline_load_f, 3),
     CALLDEF(C_r_pipeline_save, 1),

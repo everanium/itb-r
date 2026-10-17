@@ -22,7 +22,7 @@
 # Pipeline's external pointer in its protected slot, pinning at the C
 # level as well.
 
-ITB_R_VERSION <- "0.7.2"
+ITB_R_VERSION <- "0.7.3"
 
 # ---- internal helpers -------------------------------------------------
 
@@ -301,6 +301,23 @@ from_hex <- function(h) {
 pipeline_create <- function(profile, opts = "") {
   .wrap_pipeline(.Call(C_r_pipeline_create, profile, opts))
 }
+
+#' Creates a Triple Pipeline for `profile` from caller-supplied master
+#' keys (`masters` is a list of raw vectors). Opts are a URL-query
+#' string (see `itb_opts`) or `NULL`.
+#' @export
+pipeline_create_keys <- function(profile, masters, opts = NULL) {
+  if (!is.list(masters)) {
+    stop("itb: masters must be a list of raw vectors")
+  }
+  raw_masters <- lapply(masters, .as_bytes, what = "master key")
+  opts_s <- if (is.null(opts)) "" else opts
+  .wrap_pipeline(.Call(C_r_pipeline_create_keys, profile, raw_masters, opts_s))
+}
+
+#' @rdname pipeline_create_keys
+#' @export
+pipeline_init_keys <- pipeline_create_keys
 
 #' Reopens a Triple Pipeline from a blob produced by `pipeline_save`
 #' or `pipeline_rekey` (the receiving side of a key exchange). The
