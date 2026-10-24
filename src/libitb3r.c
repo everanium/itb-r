@@ -285,6 +285,18 @@ static SEXP cipher_call(cipher_fn fn, uintptr_t handle, const Rbyte *src,
  * the produced or required length through n. */
 typedef int (*buf_fn)(void *ctx, void *out, size_t cap, size_t *n);
 
+/* Zeroes a buffer through a volatile byte pointer so the compiler
+ * cannot dead-store-eliminate the wipe before release. */
+static void wipe_bytes(void *ptr, size_t len) {
+    if (ptr == NULL || len == 0) {
+        return;
+    }
+    volatile uint8_t *vp = (volatile uint8_t *)ptr;
+    while (len--) {
+        *vp++ = 0;
+    }
+}
+
 /* Runs a caller-allocated-buffer entry with the retry-once discipline;
  * returns the R_alloc scratch holding the produced bytes and their
  * count through *len. */
@@ -295,10 +307,12 @@ static char *buf_call(buf_fn fn, void *ctx, size_t cap, size_t *len) {
         size_t n = 0;
         int rc = fn(ctx, buf, cap, &n);
         if (rc == ST_BUFFER_TOO_SMALL && n > cap && attempt == 0) {
+            wipe_bytes(buf, cap);
             cap = n;
             continue;
         }
         if (rc != ST_OK) {
+            wipe_bytes(buf, cap);
             raise_status(rc);
         }
         buf[n] = '\0';
@@ -593,10 +607,12 @@ static int init_thunk(void *ctx, void *out, size_t cap, size_t *n) {
 SEXP C_r_pipeline_create(SEXP profile, SEXP opts) {
     init_ctx c;
     size_t len = 0;
+    char *buf;
     c.profile = arg_string(profile, "profile");
     c.opts = arg_string(opts, "opts");
     c.handle = 0;
-    buf_call(init_thunk, &c, BLOB_CAP, &len);
+    buf = buf_call(init_thunk, &c, BLOB_CAP, &len);
+    wipe_bytes(buf, len);
     return make_handle(c.handle, PIPE_TAG, R_NilValue, pipe_finalizer);
 }
 
@@ -618,7 +634,7 @@ static int init_keys_thunk(void *ctx, void *out, size_t cap, size_t *n) {
                                  &c->handle);
     if (c->flat != NULL &&
         !(rc == ST_BUFFER_TOO_SMALL && *n > cap && c->attempt == 0)) {
-        memset(c->flat, 0, c->total_len);
+        wipe_bytes(c->flat, c->total_len);
     }
     c->attempt++;
     return rc;
@@ -629,6 +645,7 @@ static int init_keys_thunk(void *ctx, void *out, size_t cap, size_t *n) {
 SEXP C_r_pipeline_create_keys(SEXP profile, SEXP masters, SEXP opts) {
     init_keys_ctx c;
     size_t len = 0, i, off;
+    char *buf;
     c.profile = arg_string(profile, "profile");
     if (TYPEOF(masters) != VECSXP) {
         Rf_error("itb: masters must be a list of raw vectors");
@@ -663,7 +680,8 @@ SEXP C_r_pipeline_create_keys(SEXP profile, SEXP masters, SEXP opts) {
             }
         }
     }
-    buf_call(init_keys_thunk, &c, BLOB_CAP, &len);
+    buf = buf_call(init_keys_thunk, &c, BLOB_CAP, &len);
+    wipe_bytes(buf, len);
     return make_handle(c.handle, PIPE_TAG, R_NilValue, pipe_finalizer);
 }
 
@@ -711,8 +729,10 @@ static int save_thunk(void *ctx, void *out, size_t cap, size_t *n) {
 SEXP C_r_pipeline_save(SEXP ptr) {
     uintptr_t handle = check_handle(ptr, PIPE_TAG, "pipeline");
     size_t len = 0;
-    const char *buf = buf_call(save_thunk, &handle, BLOB_CAP, &len);
-    return raw_from(buf, len);
+    char *buf = buf_call(save_thunk, &handle, BLOB_CAP, &len);
+    SEXP out = raw_from(buf, len);
+    wipe_bytes(buf, len);
+    return out;
 }
 
 /* Writes the blob to path inside the library (mode 0600). */
@@ -782,12 +802,15 @@ static int rekey_thunk(void *ctx, void *out, size_t cap, size_t *n) {
 SEXP C_r_pipeline_rekey(SEXP ptr, SEXP perm, SEXP wrap) {
     rekey_ctx c;
     size_t len = 0;
-    const char *buf;
+    char *buf;
+    SEXP out;
     c.handle = check_handle(ptr, PIPE_TAG, "pipeline");
     c.perm = arg_raw(perm, &c.permlen, "perm master");
     c.wrap = arg_raw(wrap, &c.wraplen, "wrap master");
     buf = buf_call(rekey_thunk, &c, BLOB_CAP, &len);
-    return raw_from(buf, len);
+    out = raw_from(buf, len);
+    wipe_bytes(buf, len);
+    return out;
 }
 
 /* Zeroes the key material and marks the Pipeline closed (idempotent
