@@ -90,12 +90,12 @@ pipeline_free(sender)
 
 `itb_opts` builds the URL-query opts string overriding the profile
 default at `pipeline_create` (chunk size, outer cipher, parallax
-on/off, wrapper on/off, MAC name, palette, worker cap). The resolved
+on/off, wrapper on/off, MAC name, palette, `interlock` (`"48"` | `"168"`, `""` = default 48-bit; `"168"` requires a 512-bit hash), worker cap). The resolved
 shape is written into the blob, so the receiver loads it with no opts
 of its own:
 
 ```r
-opts <- itb_opts(mode = 2, chunk_size = 65536, with_wrapper = FALSE)
+opts <- itb_opts(mode = 2, interlock = "168", chunk_size = 65536, with_wrapper = FALSE)
 sender <- pipeline_create("singlemsg-triple-mac-v1", opts = opts)
 receiver <- pipeline_load(pipeline_save(sender))
 ```
@@ -155,7 +155,7 @@ keys map onto the Go opts grammar; unknown keys pass through
 verbatim):
 
 ```r
-opts <- itb_opts(mode = 2, nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
+opts <- itb_opts(mode = 2, interlock = "168", nonce_bits = 512, key_bits = 1024, chunk_size = 65536)
 pipe <- pipeline_create("streaming-aead-triple-mac-v1", opts = opts)
 ```
 

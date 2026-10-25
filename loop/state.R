@@ -71,6 +71,7 @@ new_config <- function() {
   cfg$chunk_size <- 0       # 0 = profile default
   cfg$barrier_fill <- 0     # 0 = profile default
   cfg$drbg <- ""            # DRBG fill primitive; "" = profile default (auto tier)
+  cfg$interlock <- ""       # Interlocked Barrier chunk width: "48" | "168"; "" = profile default
   cfg$gomaxprocs <- 0       # 0 = inherit from the environment
   cfg$rekey_every <- 0      # per-worker iterations between rotations; 0 = never
   cfg$blob_cycle_every <- 0 # per-worker iterations between reopens; 0 = never

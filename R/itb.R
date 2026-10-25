@@ -22,7 +22,7 @@
 # Pipeline's external pointer in its protected slot, pinning at the C
 # level as well.
 
-ITB_R_VERSION <- "0.7.5"
+ITB_R_VERSION <- "0.8.1"
 
 # ---- internal helpers -------------------------------------------------
 
@@ -180,6 +180,7 @@ hash_names <- function() {
 # passes through unchanged.
 .OPTS_KEY_MAP <- c(
   mode = "mode",
+  interlock = "interlock",
   nonce_bits = "nonceBits",
   key_bits = "keyBits",
   with_parallax = "withParallax",

@@ -32,7 +32,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.7.5")
+  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.8.1")
 })
 
 test_that("drbg_auto_tier names a fill cipher", {
@@ -626,4 +626,36 @@ test_that("drbg survives a register copy", {
   register("r-binding-test-drbg-copy", record)
   expect_true(grepl('"drbg":"csprng"', lookup("r-binding-test-drbg-copy"), fixed = TRUE))
   pipeline_free(pipe)
+})
+
+test_that("interlock 168 round trip, inspect, and bad input", {
+  sender <- pipeline_create("singlemsg-triple-mac-v1",
+    opts = itb_opts(interlock = "168")
+  )
+  plain <- charToRaw("interlock 168")
+  wire <- pipeline_encrypt_message(sender, plain)
+  expect_identical(pipeline_decrypt_message(sender, wire), plain)
+
+  blob <- pipeline_save(sender)
+  record <- inspect(blob)
+  expect_true(grepl('"interlock":"168"', record, fixed = TRUE))
+
+  receiver <- pipeline_load(blob)
+  expect_identical(pipeline_decrypt_message(receiver, wire), plain)
+  pipeline_free(receiver)
+  pipeline_free(sender)
+
+  expect_itb_status(
+    pipeline_create("singlemsg-triple-mac-v1",
+      opts = itb_opts(inner_hash = "blake3", interlock = "168")
+    ),
+    itb_status$BAD_INPUT
+  )
+
+  expect_itb_status(
+    pipeline_create("singlemsg-triple-mac-v1",
+      opts = itb_opts(interlock = "96")
+    ),
+    itb_status$BAD_INPUT
+  )
 })

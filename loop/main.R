@@ -103,6 +103,8 @@ FLAGS <- list(
     "concurrent workers (1..10); on runtimes without parallelism values above 1 are clamped to 1"),
   list("hash", "string", KIND_STRING, "areion512",
     "inner ITB hash primitive name"),
+  list("interlock", "string", KIND_STRING, "",
+    "Interlocked Barrier chunk width: 48 | 168; empty = profile default (48; 168 requires 512-bit hash)"),
   list("iterations", "int", KIND_INT64, 0,
     "fixed per-worker iteration count; 0 = duration-based"),
   list("json-output", "", KIND_BOOL, FALSE,
@@ -482,6 +484,13 @@ parse_flags <- function(argv) {
   }
   # Validated by Init: the C ABI enumerates no DRBG names.
   cfg$drbg <- raw[["drbg"]]
+  cfg$interlock <- raw[["interlock"]]
+  if (!(cfg$interlock %in% c("", "48", "168"))) {
+    err_line(sprintf(
+      '--interlock must be 48 | 168 (or empty = profile default), got "%s"',
+      cfg$interlock))
+    return(fail())
+  }
   chunk_size <- parse_size(raw[["chunk-size"]])
   if (is.null(chunk_size)) {
     err_line(sprintf('--chunk-size: invalid size "%s"', raw[["chunk-size"]]))
@@ -551,6 +560,10 @@ log_pipeline_initialised <- function(profile, blob) {
   if (drbg != "-") {
     line <- paste0(line, " drbg=", drbg)
   }
+  interlock <- record_str(json, "interlock")
+  if (interlock != "-") {
+    line <- paste0(line, " interlock=", interlock)
+  }
   log_line(line)
   invisible(NULL)
 }
@@ -616,6 +629,7 @@ build_pipeline <- function(cfg, profile) {
     nonce_bits = cfg$nonce_bits,
     barrier_fill = cfg$barrier_fill,
     drbg = cfg$drbg,
+    interlock = cfg$interlock,
     chunk_size = cfg$chunk_size
   )
   if (nzchar(cfg$profile)) {
@@ -711,7 +725,8 @@ run <- function(argv) {
     payload_mode_name(cfg$payload_mode), cfg$seed,
     if (cfg$json_output) "true" else "false"),
     if (cfg$blob_mode != 1) sprintf(" blob-mode=%.0f", cfg$blob_mode) else "",
-    if (nzchar(cfg$drbg)) paste0(" drbg=", cfg$drbg) else ""))
+    if (nzchar(cfg$drbg)) paste0(" drbg=", cfg$drbg) else "",
+    if (nzchar(cfg$interlock)) paste0(" interlock=", cfg$interlock) else ""))
   log_line(sprintf("policy: microbatch-tiers=%s hashpool-starters=%s",
     policy_label("ITB_MICROBATCH_TIERS"),
     policy_label("ITB_HASHPOOL_STARTERS")))
