@@ -88,7 +88,7 @@ FLAGS <- list(
   list("blob-cycle-every", "int", KIND_INT64, 0,
     "reopen each pipeline from its session blob every N iterations per worker; 0 = never"),
   list("blob-mode", "int", KIND_INT, 1,
-    "container floor sizing mode: 1 (per-region, default) | 2 (per-container)"),
+    "container floor sizing mode: 1 (per-region, default) | 2 (per-container) | 3 (gauss-posit)"),
   list("chunk-size", "string", KIND_STRING, "0",
     "streaming chunk-size budget (e.g. 4MB); 0 = profile default; inert for pure message shape"),
   list("drbg", "string", KIND_STRING, "",
@@ -470,9 +470,9 @@ parse_flags <- function(argv) {
     return(fail())
   }
   cfg$blob_mode <- raw[["blob-mode"]]
-  if (!(cfg$blob_mode %in% c(1, 2))) {
+  if (!(cfg$blob_mode %in% c(1, 2, 3))) {
     err_line(sprintf(
-      "--blob-mode must be 1 (per-region) | 2 (per-container), got %.0f",
+      "--blob-mode must be 1 (per-region) | 2 (per-container) | 3 (gauss-posit), got %.0f",
       cfg$blob_mode))
     return(fail())
   }
@@ -553,8 +553,9 @@ log_pipeline_initialised <- function(profile, blob) {
     record_int(json, "barrier_fill"), record_int(json, "chunk"),
     record_str(json, "mac"), on_off(record_bool(json, "parallax")),
     on_off(record_bool(json, "wrapper")))
-  if (record_int(json, "container_mode") == 2) {
-    line <- paste0(line, " container-mode=2")
+  container_mode <- record_int(json, "container_mode")
+  if (container_mode == 2 || container_mode == 3) {
+    line <- paste0(line, sprintf(" container-mode=%.0f", container_mode))
   }
   drbg <- record_str(json, "drbg")
   if (drbg != "-") {

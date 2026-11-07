@@ -32,7 +32,7 @@ test_that("version reports library and binding versions", {
   v <- version()
   expect_type(v, "character")
   expect_gt(nchar(v), 0)
-  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.9.0")
+  expect_equal(as.character(utils::packageVersion("libitb3r")), "0.9.1")
 })
 
 test_that("drbg_auto_tier names a fill cipher", {
@@ -358,6 +358,10 @@ test_that("inspect carries container_mode override", {
   record <- inspect(pipeline_save(pipe))
   expect_true(grepl('"container_mode":2', record, fixed = TRUE))
   pipeline_free(pipe)
+  pipe3 <- pipeline_create("singlemsg-triple-mac-v1", itb_opts(mode = 3L))
+  record3 <- inspect(pipeline_save(pipe3))
+  expect_true(grepl('"container_mode":3', record3, fixed = TRUE))
+  pipeline_free(pipe3)
 })
 
 test_that("max_workers", {
